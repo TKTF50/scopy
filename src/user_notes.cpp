@@ -61,8 +61,7 @@ UserNotes::UserNotes(QWidget *parent) :
 	QFile tempFile(oldSettings.fileName() + ".bak");
         QSettings settings(tempFile.fileName(), QSettings::IniFormat);
 
-        notes_api->load(settings);
-        ui->stackedWidget->setStyleSheet("background-color: black;");
+	notes_api->load(settings);
 
         ui->stackedWidget->set_controls_enabled(false);
 }
@@ -104,17 +103,13 @@ void UserNotes::browse_btn_clicked(bool clicked)
 	setDynamicProperty(ui->pathLineEdit, "invalid", false);
 	ui->pathWarning->setText("");
 
-	QString pathToFile = "";
-	auto export_dialog( new QFileDialog( this ) );
-	export_dialog->setWindowModality( Qt::WindowModal );
-	export_dialog->setFileMode( QFileDialog::AnyFile );
-	export_dialog->setAcceptMode( QFileDialog::AcceptOpen );
-	export_dialog->setNameFilters({"(*.html)"});
-	if (export_dialog->exec()){
-		QFile f(export_dialog->selectedFiles().at(0));
-		pathToFile = f.fileName();
-		ui->pathLineEdit->setText(pathToFile);
-        ui->pathLineEdit->setStyleSheet("");
+	QString fileName = QFileDialog::getOpenFileName(this,
+	    tr("Import"), "", tr("Html (*.html);;"),
+	    nullptr);
+
+	if (fileName.length()) {
+		ui->pathLineEdit->setText(fileName);
+		ui->pathLineEdit->setStyleSheet("");
 	}
 }
 

@@ -168,16 +168,23 @@ namespace adiscope {
 		void setBufferSizeLabelValue(int numSamples);
 		void setSampleRatelabelValue(double sampleRate);
 		void setTriggerState(int triggerState);
+		void setMaxBufferSizeErrorLabel(bool reached, const QString &customWarning = "");
 		void setCursorReadoutsTransparency(int value);
 		void moveCursorReadouts(CustomPlotPositionButton::ReadoutsPosition position);
 		void setHorizCursorsLocked(bool value);
 		void setVertCursorsLocked(bool value);
 		void showEvent(QShowEvent *event);
 		void printWithNoBackground(const QString& toolName = "", bool editScaleDraw = true);
+
+		int getAnalogChannels() const;
+
+		/* digital channels */
 		void onDigitalChannelAdded(int chnIdx);
 		void setChannelSelectable(int chnIdx, bool selectable);
 		void removeDigitalPlotCurve(QwtPlotCurve *curve);
 		void setOffsetHandleVisible(int chIdx, bool visible);
+
+		/* channel group */
 		void addToGroup(int currentGroup, int toAdd);
 		void beginGroupSelection();
 		bool endGroupSelection(bool moveAnnotationCurvesLast = false);    // TODO: toggle group selection
@@ -249,6 +256,7 @@ namespace adiscope {
 		QLabel *d_timeBaseLabel;
 		QLabel *d_sampleRateLabel;
 		QLabel *d_triggerStateLabel;
+		QLabel *d_maxBufferError;
 
 		int d_bufferSizeLabelVal;
 		double d_sampleRateLabelVal;
@@ -325,6 +333,7 @@ namespace adiscope {
 
 		QPair<double, double> d_xAxisInterval;
 		int d_currentHandleInitPx;
+		void pushBackNewOffsetWidgets(RoundedHandleV *chOffsetHdl, HorizBar *chOffsetBar);
 	};
 }
 

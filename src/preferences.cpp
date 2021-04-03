@@ -30,6 +30,7 @@
 #include <QFileInfo>
 #include <QTextStream>
 #include <scopyApplication.hpp>
+#include "application_restarter.h"
 
 
 using namespace adiscope;
@@ -64,7 +65,12 @@ Preferences::Preferences(QWidget *parent) :
 	m_instrument_notes_active(false),
 	m_debug_messages_active(false),
 	m_attemptTempLutCalib(false),
-	m_skipCalIfCalibrated(true)
+	m_skipCalIfCalibrated(true),
+	automatical_version_checking_enabled(false),
+	first_application_run(true),
+	check_updates_url("https://swdownloads.analog.com/cse/sw_versions.json"),
+	m_colorEditor(nullptr),
+	m_logging_enabled(false)
 {
 	ui->setupUi(this);
 
@@ -143,6 +149,11 @@ Preferences::Preferences(QWidget *parent) :
 		Q_EMIT notify();
 	});
 
+	connect(ui->enableLoggingCheckBox, &QCheckBox::stateChanged, [=](int state) {
+		m_logging_enabled = !!state;
+		Q_EMIT notify();
+	});
+
 	connect(ui->enableAnimCheckBox, &QCheckBox::stateChanged, [=](int state) {
 		animations_enabled = (!state ? false : true);
 		Q_EMIT notify();
@@ -177,6 +188,13 @@ Preferences::Preferences(QWidget *parent) :
 			info.exec();
 		}
 	});
+	connect(ui->autoUpdatesCheckBox, &QCheckBox::stateChanged, [=](int state) {
+		automatical_version_checking_enabled = (!state ? false : true);
+		if(automatical_version_checking_enabled) {
+			Q_EMIT requestUpdateCheck();
+		}
+		Q_EMIT notify();
+	});
 
 	connect(ui->instrumentNotesCheckbox, &QCheckBox::stateChanged, [=](int state) {
 		m_instrument_notes_active = (!state ? false : true);
@@ -194,13 +212,6 @@ Preferences::Preferences(QWidget *parent) :
 	pref_api->setObjectName(QString("Preferences"));
 	pref_api->load(settings);
 
-	ui->label_restart->setVisible(false);
-	//////////////////////
-	// TEMPORARY UNTIL ACTUAL IMPLEMENTATION
-	ui->tempLutCalibCheckbox->setVisible(false);
-	ui->label_28->setVisible(false);
-	//////////////////////////
-
 	ui->languageCombo->addItems(getOptionsList());
 
 
@@ -212,7 +223,7 @@ Preferences::Preferences(QWidget *parent) :
 				ui->languageCombo->addItem(language);
 				ui->languageCombo->setCurrentText(language);
 				if (m_initialized) {
-					ui->label_restart->setVisible(true);
+					requestRestart();
 				}
 			} else {
 				if(!getLanguageList().contains(language)){
@@ -220,12 +231,11 @@ Preferences::Preferences(QWidget *parent) :
 					language = info.fileName().remove(".qm");
 				}
 				ui->languageCombo->setCurrentText(language);
-				ui->label_restart->setVisible(false);
 			}
 		} else {
 			language = lang;
 			if (m_initialized) {
-				ui->label_restart->setVisible(true);
+				requestRestart();
 			}
 
 			Q_EMIT notify();
@@ -236,6 +246,59 @@ Preferences::Preferences(QWidget *parent) :
 		m_displaySamplingPoints = (!state ? false : true);
 		Q_EMIT notify();
 	});
+
+	ui->comboBoxTheme->addItem("default");
+	ui->comboBoxTheme->addItem("light");
+	ui->comboBoxTheme->addItem("browse");
+	connect(ui->comboBoxTheme, &QComboBox::currentTextChanged, [=](const QString &stylesheet) {
+		if (stylesheet == "browse") {
+			QString filePath = QFileDialog::getOpenFileName(this,
+					tr("Load Theme"), "", tr("Stylesheet files (*.qss)"),
+					nullptr, (m_useNativeDialogs ? QFileDialog::Options() : QFileDialog::DontUseNativeDialog));
+
+			if (filePath.isEmpty()) {
+				QSignalBlocker blocker(ui->comboBoxTheme);
+				ui->comboBoxTheme->setCurrentText(m_colorEditor->getCurrentStylesheet());
+				return;
+			}
+
+			m_colorEditor->setUserStylesheets({filePath});
+			m_colorEditor->setCurrentStylesheet(filePath);
+
+			requestRestart();
+
+
+		} else {
+			m_colorEditor->setCurrentStylesheet(stylesheet);
+
+			// force saving of the ini file as the new Scopy process
+			// when restarted will start before scopy closes. A race condition
+			// will appear on who gets to read/write to the .ini file first
+			QString preference_ini_file = getPreferenceIniFile();
+			QSettings settings(preference_ini_file, QSettings::IniFormat);
+			pref_api->save(settings);
+
+			requestRestart();
+		}
+	});
+}
+
+void Preferences::requestRestart()
+{
+	QMessageBox msgBox;
+	msgBox.setText(tr("An application restart is required for these settings to take effect .. "));
+	msgBox.setInformativeText(tr("Do you want to restart now ?"));
+	msgBox.setStandardButtons(QMessageBox::Ok | QMessageBox::Cancel);
+	auto buttonOk = msgBox.button(QMessageBox::Ok);
+	auto buttonCancel = msgBox.button(QMessageBox::Cancel);
+	buttonOk->setText("Now");
+	buttonCancel->setText("Later");
+	int ret = msgBox.exec();
+
+	if (ret == QMessageBox::Ok) {
+		// restart:
+		adiscope::ApplicationRestarter::triggerRestart();
+	}
 }
 
 QStringList Preferences::getOptionsList()
@@ -325,6 +388,16 @@ void Preferences::showEvent(QShowEvent *event)
 	ui->skipCalCheckbox->setChecked(m_skipCalIfCalibrated);
 	// by this point the preferences menu is initialized
 	m_initialized = true;
+	ui->autoUpdatesCheckBox->setChecked(automatical_version_checking_enabled);
+#ifdef LIBM2K_ENABLE_LOG
+	ui->enableLoggingCheckBox->setChecked(m_logging_enabled);
+	ui->loggingUnavailableLabel->setVisible(false);
+#else
+	ui->enableLoggingCheckBox->setChecked(false);
+	ui->enableLoggingCheckBox->setCheckable(false);
+	ui->loggingUnavailableLabel->setVisible(true);
+	m_logging_enabled = false;
+#endif
 
 	QWidget::showEvent(event);
 }
@@ -334,7 +407,6 @@ QString Preferences::getPreferenceIniFile()
 	QSettings settings;
 	QFileInfo fileInfo(settings.fileName());
 	QString preference_ini_file = fileInfo.absolutePath() + "/Preferences.ini";
-
 	return preference_ini_file;
 }
 
@@ -571,6 +643,57 @@ void Preferences::setSkipCalIfCalibrated(bool val)
 {
 	m_skipCalIfCalibrated = val;
 }
+bool Preferences::getAutomatical_version_checking_enabled() const
+{
+	return automatical_version_checking_enabled;
+}
+
+void Preferences::setAutomatical_version_checking_enabled(bool value)
+{
+	automatical_version_checking_enabled = value;
+}
+
+QString Preferences::getCheck_updates_url() const
+{
+	return check_updates_url;
+}
+
+void Preferences::setCheck_update_url(const QString& link)
+{
+	check_updates_url = link;
+}
+
+bool Preferences::getFirst_application_run() const
+{
+	return first_application_run;
+}
+
+void Preferences::setFirst_application_run(bool value)
+{
+	first_application_run = value;
+}
+
+
+void Preferences::setColorEditor(ScopyColorEditor *colorEditor)
+{
+	m_colorEditor = colorEditor;
+	QSignalBlocker blocker(ui->comboBoxTheme);
+	if (m_colorEditor->getUserStylesheets().size()) {
+		ui->comboBoxTheme->insertItem(2, m_colorEditor->getUserStylesheets().back());
+	}
+	ui->comboBoxTheme->setCurrentText(m_colorEditor->getCurrentStylesheet());
+	QIcon::setThemeName("scopy-" + m_colorEditor->getCurrentStylesheet());
+}
+
+bool Preferences::getLogging_enabled() const
+{
+	return m_logging_enabled;
+}
+
+void Preferences::setLogging_enabled(bool value)
+{
+	m_logging_enabled = value;
+}
 
 bool Preferences_API::getAnimationsEnabled() const
 {
@@ -758,6 +881,34 @@ void Preferences_API::setSkipCalIfCalibrated(bool val)
 	preferencePanel->m_skipCalIfCalibrated = val;
 }
 
+QString Preferences_API::getCurrentStylesheet() const
+{
+	if (!preferencePanel->m_colorEditor) {
+		return "";
+	}
+
+	return preferencePanel->m_colorEditor->getCurrentStylesheet();
+}
+
+void Preferences_API::setCurrentStylesheet(const QString &currentStylesheet)
+{
+//	preferencePanel->m_colorEditor->setCurrentStylesheet(currentStylesheet);
+}
+
+QStringList Preferences_API::getUserStylesheets() const
+{
+	if (!preferencePanel->m_colorEditor) {
+		return QStringList();
+	}
+
+	return preferencePanel->m_colorEditor->getUserStylesheets();
+}
+
+void Preferences_API::setUserStylesheets(const QStringList &userStylesheets)
+{
+//	preferencePanel->m_colorEditor->setUserStylesheets(userStylesheets);
+}
+
 bool Preferences::hasNativeDialogs() const
 {
     return m_useNativeDialogs;
@@ -806,4 +957,33 @@ bool Preferences_API::getDebugMessagesActive() const
 void Preferences_API::setDebugMessagesActive(bool val)
 {
 	preferencePanel->setDebugMessagesActive(val);
+}
+bool Preferences_API::getAutomaticalVersionCheckingEnabled() const
+{
+	return preferencePanel->automatical_version_checking_enabled;
+}
+
+void Preferences_API::setAutomaticalVersionCheckingEnabled(const bool &enabled)
+{
+	preferencePanel->automatical_version_checking_enabled = enabled;
+}
+
+QString Preferences_API::getCheckUpdatesUrl() const
+{
+	return preferencePanel->check_updates_url;
+}
+
+void Preferences_API::setCheckUpdatesUrl(const QString &link)
+{
+	preferencePanel->check_updates_url = link;
+}
+
+bool Preferences_API::getFirstApplicationRun() const
+{
+	return preferencePanel->first_application_run;
+}
+
+void Preferences_API::setFirstApplicationRun(const bool &first)
+{
+	preferencePanel->first_application_run = first;
 }

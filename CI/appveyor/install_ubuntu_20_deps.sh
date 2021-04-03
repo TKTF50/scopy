@@ -2,6 +2,7 @@
 
 LIBIIO_BRANCH=master
 LIBAD9361_BRANCH=master
+GLOG_BRANCH=v0.4.0
 LIBM2K_BRANCH=master
 GRIIO_BRANCH=upgrade-3.8
 GNURADIO_FORK=analogdevicesinc
@@ -12,6 +13,7 @@ QWT_BRANCH=qwt-6.1-multiaxes
 QWTPOLAR_BRANCH=master # not used
 LIBSIGROK_BRANCH=master
 LIBSIGROKDECODE_BRANCH=master #not used
+LIBTINYIIOD_BRANCH=master
 
 set -e
 if [ $# -eq 0 ]; then
@@ -28,12 +30,9 @@ cd ~
 WORKDIR=${PWD}
 
 install_apt() {
-	sudo add-apt-repository -y ppa:gnuradio/gnuradio-releases
 
-	sudo apt-get -y install libxml2-dev libxml2 flex bison swig libpython3-all-dev python3 python3-numpy libfftw3-bin libfftw3-dev libfftw3-3 liblog4cpp5v5 liblog4cpp5-dev libboost1.65-dev libboost1.65 g++ git cmake autoconf libzip4 libzip-dev libglib2.0-dev libsigc++-2.0-dev libglibmm-2.4-dev doxygen curl libvolk1-bin libvolk1-dev libvolk1.3 libgmp-dev libmatio-dev liborc-0.4-dev subversion mesa-common-dev libgl1-mesa-dev
+	sudo apt-get -y install libxml2-dev libxml2 flex bison swig libpython3-all-dev python3 python3-numpy libfftw3-bin libfftw3-dev libfftw3-3 liblog4cpp5v5 liblog4cpp5-dev g++ git cmake autoconf libzip5 libzip-dev libglib2.0-dev libsigc++-2.0-dev libglibmm-2.4-dev libclang1-9 doxygen curl libmatio-dev liborc-0.4-dev subversion mesa-common-dev libgl1-mesa-dev gnuradio libserialport0 libserialport-dev libusb-1.0 libusb-1.0-0 libusb-1.0-0-dev
 
-	sudo apt-get -y update
-	sudo apt-get -y install gnuradio
 }
 
 build_libiio() {
@@ -59,6 +58,25 @@ build_libiio() {
 #	DESTDIR=${WORKDIR} make ${JOBS} install
 }
 
+build_glog() {
+
+	echo "### Building glog - branch $GLOG_BRANCH"
+
+	cd ~
+	git clone --depth 1 https://github.com/google/glog.git -b $GLOG_BRANCH ${WORKDIR}/glog
+
+	mkdir ${WORKDIR}/glog/build-${ARCH}
+	cd ${WORKDIR}/glog/build-${ARCH}
+
+	cmake	${CMAKE_OPTS} \
+		-DWITH_GFLAGS=OFF\
+		${WORKDIR}/glog
+
+	make $JOBS
+	sudo make ${JOBS} install
+	#DESTDIR=${WORKDIR} make ${JOBS} install
+}
+
 build_libm2k() {
 
 	echo "### Building libm2k - branch $LIBM2K_BRANCH"
@@ -75,6 +93,7 @@ build_libm2k() {
 		-DENABLE_EXAMPLES=OFF\
 		-DENABLE_TOOLS=OFF\
 		-DINSTALL_UDEV_RULES=OFF\
+		-DENABLE_LOG=ON\
 		${WORKDIR}/libm2k
 
 	make $JOBS
@@ -221,9 +240,26 @@ build_qwtpolar() {
 
 }
 
+build_libtinyiiod() {
+	echo "### Building libtinyiiod - branch $LIBTINYIIOD_BRANCH"
+
+	cd ~
+	git clone --depth 1 https://github.com/analogdevicesinc/libtinyiiod.git -b $LIBTINYIIOD_BRANCH ${WORKDIR}/libtinyiiod
+	mkdir ${WORKDIR}/libtinyiiod/build-${ARCH}
+	cd ${WORKDIR}/libtinyiiod/build-${ARCH}
+
+	cmake ${CMAKE_OPTS} \
+		-DBUILD_EXAMPLES=OFF \
+		${WORKDIR}/libtinyiiod
+
+	make $JOBS
+	sudo make $JOBS install
+}
+
 install_apt
 build_libiio
 build_libad9361
+build_glog
 build_libm2k
 build_griio
 build_grscopy
@@ -232,3 +268,4 @@ build_qwt
 build_qwtpolar
 #build_libsigrok
 build_libsigrokdecode
+build_libtinyiiod

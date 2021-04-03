@@ -378,7 +378,7 @@ SignalGenerator::SignalGenerator(struct iio_context *_ctx, Filter *filt,
 
 	connect(ui->btnNoiseCollapse,&QPushButton::clicked,
 		[=](bool check) {
-			ui->wNoise->setVisible(!check);
+			ui->wNoise->setVisible(check);
 		});
 
 	unsigned int nb_channels = m_m2k_analogout->getNbChannels();
@@ -491,7 +491,10 @@ SignalGenerator::SignalGenerator(struct iio_context *_ctx, Filter *filt,
 	ui->plot->insertWidget(0,plot, 0, 0);
 
 	connect(ui->btnAppearanceCollapse, SIGNAL(toggled(bool)),ui->wAppearance, SLOT(setVisible(bool)));
-	ui->wAppearance->hide();
+
+	connect(ui->btnSigGenAutoscale, &QPushButton::toggled, [=](bool checked){
+		plot->setAutoScale(checked);
+	});
 
 	fileManager = new FileManager("Signal Generator");
 
@@ -500,7 +503,6 @@ SignalGenerator::SignalGenerator(struct iio_context *_ctx, Filter *filt,
 	api->load(*settings);
 	api->js_register(engine);
 
-	renameConfigPanel();
 	connect(ui->rightMenu, SIGNAL(finished(bool)), this,
 	        SLOT(rightMenuFinished(bool)));
 
@@ -593,6 +595,8 @@ SignalGenerator::SignalGenerator(struct iio_context *_ctx, Filter *filt,
 
 	// Reduce the extent of the yLeft axis because it is not needed
 	plot->axisWidget(QwtPlot::yLeft)->scaleDraw()->setMinimumExtent(65);
+
+	ui->btnHelp->setUrl("https://wiki.analog.com/university/tools/m2k/scopy/siggen");
 }
 
 SignalGenerator::~SignalGenerator()
@@ -1083,8 +1087,8 @@ void SignalGenerator::tabChanged(int index)
 
 void SignalGenerator::updatePreview()
 {
-	static const float MAX_PREVIEW_RANGE = (float)(SHRT_MAX);
-	static const float MIN_PREVIEW_RANGE = (float)(SHRT_MIN);
+	static const float MAX_PREVIEW_RANGE = AMPLITUDE_VOLTS;
+	static const float MIN_PREVIEW_RANGE = -AMPLITUDE_VOLTS;
 
 	const int nb_points_correction = 16; // generate slightly more points to avoid incomplete scope_sink_f buffer
 	gr::top_block_sptr top = make_top_block("Signal Generator Update");
@@ -1938,18 +1942,6 @@ void adiscope::SignalGenerator::channelWidgetMenuToggled(bool checked)
 	triggerRightMenuToggle(cw->id(), checked);
 }
 
-void adiscope::SignalGenerator::renameConfigPanel()
-{
-	/*ui->config_panel->setTitle(QString("Configuration for %1").arg(
-					   channels[currentChannel]->fullName()));*/
-	QString stylesheet = "QTabBar::tab:selected {\
-			color: white;\
-			margin-top: 0px;\
-			border-bottom: 2px solid "
-		      + channels[currentChannel]->color().name() + "}";
-	ui->tabWidget->setStyleSheet(stylesheet);
-}
-
 int SignalGenerator::sg_waveform_to_idx(enum sg_waveform wave)
 {
 	switch (wave) {
@@ -2051,7 +2043,6 @@ void SignalGenerator::updateRightMenuForChn(int chIdx)
 
 	ui->type->setCurrentIndex(sg_waveform_to_idx(ptr->waveform));
 	waveformUpdateUi(ptr->waveform);
-	renameConfigPanel();
 	ui->tabWidget->setCurrentIndex((int) ptr->type);
 	resizeTabWidget((int)ptr->type);
 }

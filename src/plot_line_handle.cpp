@@ -23,6 +23,7 @@
 
 #include <QPainter>
 #include <QMoveEvent>
+#include <QIcon>
 
 #include <QApplication>
 
@@ -662,14 +663,14 @@ void FreePlotLineHandleV::paintEvent(QPaintEvent *)
 				setToolTip("");
 			}
 
-			const double textHeight = QFontMetrics(QFont(fontFamily, fontSize)).height();
-
-			QPointF textPos(0.0, m_height / 2.0 + textHeight / 4.0);
+			const QSizeF size = QFontMetricsF(QFont(fontFamily, fontSize)).size(Qt::TextSingleLine, m_name);
+			QRectF textRect(QPointF(0.0, 0.0), size);
+			textRect.moveCenter(QPointF(m_image.width() / 2.0, m_height / 2.0));
 
 			p.save();
 			p.setPen(QPen(QBrush(Qt::white), 20));
 			p.setFont(QFont(fontFamily, fontSize));
-			p.drawText(textPos, m_name);
+			p.drawText(textRect, m_name);
 			p.restore();
 		} else {
 			p.drawPixmap(imageTopLeft, m_image);
@@ -734,7 +735,11 @@ void RoundedHandleV::paintEvent(QPaintEvent *pv)
 	QRect rect(0, 0, m_image.width() - 1, m_image.height() - 1);
 
 	if (m_selected && m_selectable) {
-		p.setPen(QPen(Qt::white, 2, Qt::SolidLine));
+		if (QIcon::themeName() == "scopy-default") {
+			p.setPen(QPen(Qt::white, 2, Qt::SolidLine));
+		} else {
+			p.setPen(QPen(Qt::black, 2, Qt::SolidLine));
+		}
 	} else {
 		p.setPen(QPen(m_roundRectColor, 1, Qt::SolidLine));
 	}

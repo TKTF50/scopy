@@ -35,6 +35,8 @@
 #include "user_notes.hpp"
 #include "external_script_api.hpp"
 #include "animationmanager.h"
+#include "singletone_wrapper.h"
+#include "phonehome.h"
 
 #include "ui_device.h"
 #include "ui_tool_launcher.h"
@@ -102,7 +104,8 @@ ToolLauncher::ToolLauncher(QString prevCrashDump, QWidget *parent) :
 	initialCalibrationFlag(true),
 	skip_calibration_if_already_calibrated(true),
 	m_adc_tools_failed(false),
-	m_dac_tools_failed(false)
+	m_dac_tools_failed(false),
+	about(nullptr)
 {
 	if (!isatty(STDIN_FILENO))
 		notifier.setEnabled(false);
@@ -128,13 +131,19 @@ ToolLauncher::ToolLauncher(QString prevCrashDump, QWidget *parent) :
 	connect(ui->btnNotes, &QPushButton::clicked, [=](){
 		swapMenu(static_cast<QWidget*>(notesPanel));
 	});
+	about = new ScopyAboutDialog(this);
+	connect(ui->btnAbout, &QPushButton::clicked, [=](){
+		if(!about)
+			about = new ScopyAboutDialog(this);
+		about->setModal(false);
+		about->show();
+		about->raise();
+		about->activateWindow();
+	});
 
 	connect(prefPanel, &Preferences::reset, this, &ToolLauncher::resetSession);
 	connect(prefPanel, &Preferences::notify, this, &ToolLauncher::readPreferences);
 
-	const QVector<QString>& uris = searchDevices();
-	for (const QString& each : uris)
-		addContext(each);
 
 	current = ui->homeWidget;
 
@@ -192,6 +201,7 @@ ToolLauncher::ToolLauncher(QString prevCrashDump, QWidget *parent) :
 
 	scopy.copy(tempFile.fileName());
 	settings = new QSettings(tempFile.fileName(), QSettings::IniFormat);
+	SingleToneWrapper<QSettings *>::getInstance().setWrapped(settings);
 
 	tl_api->ApiObject::load(*settings);
 
@@ -207,19 +217,49 @@ ToolLauncher::ToolLauncher(QString prevCrashDump, QWidget *parent) :
 		ui->saveLbl->setVisible(opened);
 		ui->loadLbl->setVisible(opened);
 		ui->prefBtn->setText(opened ? tr("Preferences") : "");
+		menu->hideMenuText(!opened);
 	});
 
 	connect(ui->stackedWidget, SIGNAL(moved(int)),
 		this, SLOT(pageMoved(int)));
 
 
+	m_phoneHome = new PhoneHome(settings, prefPanel);
+	if (prefPanel->getFirst_application_run()) {
+		QMessageBox* msgBox = new QMessageBox(this);
+
+		QSize mSize = msgBox->sizeHint(); // here's what you want, not m.width()/height()
+		QRect screenRect = QDesktopWidget().screenGeometry();
+
+		msgBox->setText("Do you want to automatically check for newer Scopy and m2k-firmware versions?");
+		msgBox->setInformativeText("You can change this anytime from the Preferences menu.");
+		msgBox->setStandardButtons(msgBox->Yes | msgBox->No);
+		msgBox->setModal(false);
+		msgBox->show();
+		msgBox->activateWindow();
+		msgBox->move( QPoint( screenRect.x() + screenRect.width()/2 - mSize.width()/2,
+				     screenRect.y() + screenRect.height()/2 - mSize.height()/2 ) );
+		connect(msgBox->button(QMessageBox::Yes), &QAbstractButton::pressed, [&] () {
+			prefPanel->setAutomatical_version_checking_enabled(true);
+			prefPanel->setFirst_application_run(false);
+		});
+		connect(msgBox->button(QMessageBox::No), &QAbstractButton::pressed, [&] () {
+			prefPanel->setFirst_application_run(false);
+		});
+	}
+	connect(prefPanel, &Preferences::requestUpdateCheck, [=]() { m_phoneHome->versionsRequest(true);});
+	connect(about, &ScopyAboutDialog::forceCheckForUpdates,[=](){
+		m_phoneHome->versionsRequest(true);
+	});
+	connect(m_phoneHome, SIGNAL(checkUpdatesFinished(qint64)), about, SLOT(updateCheckUpdateLabel(qint64)));
+
+
 	setupHomepage();
 	ui->stackedWidget->setCurrentIndex(0);
 	setupAddPage();
 	readPreferences();
-	ui->stackedWidget->setStyleSheet("background-color:black;");
 	this->installEventFilter(this);
-	ui->btnConnect->hide();
+	ui->btnConnect->hide();	
 
 	_setupToolMenu();
 
@@ -233,12 +273,28 @@ ToolLauncher::ToolLauncher(QString prevCrashDump, QWidget *parent) :
 		menu->getToolMenuItemFor(TOOL_SPECTRUM_ANALYZER)->setCalibrating(false);
 		menu->getToolMenuItemFor(TOOL_NETWORK_ANALYZER)->setCalibrating(false);
 
-		if (okc.second) {
-			selectedDev->infoPage()->setCalibrationStatusLabel(tr("Calibration skipped because already calibrated."));
-		} else if (okc.first) {
+		if (!okc.second && okc.first) {
 			selectedDev->infoPage()->setCalibrationStatusLabel(tr("Calibrated"));
 		}
+
 	});
+
+
+	const QVector<QString>& uris = searchDevices();
+	for (const QString& each : uris)
+		addContext(each);
+
+	if (prefPanel->getAutomatical_version_checking_enabled()) {
+		m_phoneHome->versionsRequest();
+	} else {
+
+	}
+
+	// TO DO: Remove temporary spaces
+	// set home icon
+	ui->btnHome->setText("  Home");
+	ui->btnHome->setIcon(QIcon::fromTheme("house"));
+	ui->btnHome->setIconSize(QSize(32,32));
 
 }
 
@@ -319,6 +375,7 @@ void ToolLauncher::_toolSelected(enum tool tool)
 
 void ToolLauncher::readPreferences()
 {
+	m_logging_enable = prefPanel->getLogging_enabled();
 	m_use_decoders = prefPanel->getDigital_decoders_enabled();
 	debugger_enabled = prefPanel->getDebugger_enabled();
 	skip_calibration_if_already_calibrated = prefPanel->getSkipCalIfCalibrated();
@@ -631,10 +688,13 @@ ToolLauncher::~ToolLauncher()
 	delete alive_timer;
 
 	delete infoWidget;
-
+	delete m_phoneHome;
 	tl_api->ApiObject::save(*settings);
+	m_sessionInfo.save(*settings);
 
-	delete settings;
+	delete settings;	
+	SingleToneWrapper<QSettings *>::getInstance().setWrapped(nullptr);
+
 	delete tl_api;
 	delete ui;
 
@@ -806,6 +866,29 @@ void ToolLauncher::setupHomepage()
 
 	QWidget *homepage = new QWidget(ui->stackedWidget);
 	QVBoxLayout *layout = new QVBoxLayout(homepage);
+	QLabel* versionLabel = new QLabel(this);
+
+	versionLabel->setText(tr("Auto update checks not enabled. Check preferences menu."));
+	connect(m_phoneHome, &PhoneHome::scopyVersionChanged, this, [=] () {
+		if (m_phoneHome->getScopyVersion().isEmpty()) {
+			//versionLabel->setText(tr("Unable to check update server!"));
+		} else if (m_phoneHome->getScopyVersion() != QString("v" + QString(PROJECT_VERSION))) {
+			versionLabel->setText(tr("Version ") + m_phoneHome->getScopyVersion() + " of Scopy was released. " +
+								  "<a href=\"" + m_phoneHome->getScopyLink() +
+								  tr("\">Click to update </a>"));
+			versionLabel->setTextFormat(Qt::RichText);
+			versionLabel->setTextInteractionFlags(Qt::TextBrowserInteraction);
+			versionLabel->setOpenExternalLinks(true);
+		} else {
+			versionLabel->setText(tr("Scopy is up to date!"));
+		}
+		versionLabel->setVisible(true);
+	});
+
+	connect(m_phoneHome, &PhoneHome::scopyVersionCheckRequested, this ,[=]() {
+		versionLabel->setText(tr("Checking server for updates ... "));
+	});
+
 	welcome = new QTextBrowser(homepage);
 	welcome->setFrameShape(QFrame::NoFrame);
 	welcome->setOpenExternalLinks(true);
@@ -831,26 +914,7 @@ void ToolLauncher::setupHomepage()
 	layout->addWidget(reportRegion);
 
 	connect(reportBtn, &QPushButton::clicked, [=](){
-		std::string os = QSysInfo::prettyProductName().toStdString();
-		std::string gittag = SCOPY_VERSION_GIT;
-		std::string fw = "";
-		if (ctx) {
-			fw = std::string(iio_context_get_attr_value(ctx, "fw_version"));
-		}
-		QSettings settings;
-		QFileInfo info(settings.fileName());
-		std::string head = "https://github.com/analogdevicesinc/scopy/issues/new?title=%3CInstrument%3E:%20%3CShort%20description%20of%20the%20bug%3E&body=";
-		std::string os_version_urlstring = "OS%20Version: " + os;
-		std::string fw_version_urlstring = "%0AFW%20Version: " + fw;
-		std::string gittag_urlstring = "%0ASW%20Version: " + gittag;
-		std::string description_urlstring = "%0A%0ADescription%20of%20the%20bug:%3Cdescription%3E%0ASteps%20to%20reproduce:"
-					  "%0A-%0A-%0A%0AThe%20ini%20files%20might%20be%20useful%20to%20reproduce%20the%20error.";
-		std::string ini_file_urlstring = "%0AThe%20ini%20file%20is%20located%20at: " + info.absoluteFilePath().toStdString();
-		std::string finalpart = "%0APlease%20consider%20attaching%20it.&labels=bug,reported-from-scopy";
-		QUrl url(QString::fromStdString(head + os_version_urlstring +
-						fw_version_urlstring + gittag_urlstring +
-						description_urlstring + ini_file_urlstring +
-						finalpart));
+		const QUrl url("https://wiki.analog.com/university/tools/m2k/scopy/report");
 		QDesktopServices::openUrl(url);
 	});
 
@@ -863,6 +927,10 @@ void ToolLauncher::setupHomepage()
 	// Index page
 	index = new QTextBrowser(ui->stackedWidget);
 	index->setFrameShape(QFrame::NoFrame);
+
+	layout->addWidget(versionLabel);
+	versionLabel->raise();
+	versionLabel->setVisible(true);
 
 	if (indexFile == "") {
 		return;
@@ -1048,9 +1116,12 @@ void adiscope::ToolLauncher::disconnect()
 		destroyContext();
 		loadToolTips(false);
 		resetStylesheets();
+		auto infoPg = selectedDev->infoPage();
+		if (infoPg) {
+			infoPg->setConnectionStatusLabel("Not connected");
+			infoPg->setCalibrationStatusLabel("");
+		}
 		search_timer->start(TIMER_TIMEOUT_MS);
-		selectedDev->infoPage()->setConnectionStatusLabel("Not connected");
-		selectedDev->infoPage()->setCalibrationStatusLabel("");
 	}
 
 	/* Update the list of devices now */
@@ -1100,8 +1171,30 @@ void adiscope::ToolLauncher::connectBtn_clicked(bool pressed)
 	if (connectedDev != selectedDev) {
 		/* Connect to the selected device, if any */
 		if (selectedDev) {
+#ifdef LIBM2K_ENABLE_LOG
+			QString path = QFileInfo(settings->fileName()).absolutePath();
+			path.append("/ScopyLog-");
+			if (m_logging_enable) {
+				// logging enabled
+				google::SetLogDestination(google::GLOG_INFO, "");
+				google::SetLogDestination(google::GLOG_INFO, path.toStdString().c_str());
+				// do not create a symlink
+				google::SetLogSymlink(google::GLOG_INFO, "");
+				// log build info
+				QFile fileBuildInfo(":/buildinfo.html");
+				fileBuildInfo.open(QIODevice::ReadOnly | QIODevice::Text);
+				auto buildInfo = QString(fileBuildInfo.readAll());
+				fileBuildInfo.close();
+				buildInfo = buildInfo.remove(QRegExp("<(/?)(body|pre)>"));
+				LOG(INFO) << buildInfo.toLocal8Bit().toStdString();
+			} else {
+				// logging disabled
+				google::SetLogDestination(google::GLOG_INFO, "");
+			}
+#endif
 			QString uri = selectedDev->uri();
 			selectedDev->infoPage()->identifyDevice(false);
+			search_timer->stop();
 			bool success = switchContext(uri);
 			if (success) {
 				selectedDev->setConnected(true, false, ctx);
@@ -1110,14 +1203,13 @@ void adiscope::ToolLauncher::connectBtn_clicked(bool pressed)
 				selectedDev->infoPage()->identifyDevice(true);
 				setDynamicProperty(ui->btnConnect, "connected", true);
 
-				search_timer->stop();
-
+				alive_timer->start(ALIVE_TIMER_TIMEOUT_MS);
 				ui->saveBtn->parentWidget()->setEnabled(true);
-
 			} else {
 				setDynamicProperty(ui->btnConnect, "failed", true);
 				selectedDev->setConnected(false, true);
 				selectedDev->connectButton()->setEnabled(true);
+				disconnect();
 			}
 
 			Q_EMIT connectionDone(success);
@@ -1348,14 +1440,19 @@ QPair<bool, bool> adiscope::ToolLauncher::calibrate()
 	bool skipCalib = false;
 
 	if (calib->isInitialized()) {
-		if (prefPanel->getAttemptTempLutCalib()) {
-			//calib->calibrateFromTemperature();
-			//selectedDev->infoPage()->setCalibrationStatusLabel(tr("Calibrated from temperature @ ") + "50G");
+		if (prefPanel->getAttemptTempLutCalib() && calib->hasContextCalibration()) {
+			float calibTemperature = calib->calibrateFromContext();
+			selectedDev->infoPage()->setCalibrationStatusLabel(tr("Calibrated from look-up table @ ") + QString::number(calibTemperature) + " deg. Celsius" );
+			skipCalib = true;
 			ok = true;
+
 		} else {
+			// always calibrate if initial flag is set
+			// if it's calibrated and skip_calibration_if_calibrated - do not calibrate
 			if (!(initialCalibrationFlag && skip_calibration_if_already_calibrated && calib->isCalibrated() )) {
 				ok = calib->calibrateAll();
 			} else {
+				selectedDev->infoPage()->setCalibrationStatusLabel(tr("Calibration skipped because already calibrated."));
 				skipCalib = true;
 				ok = true;
 			}
@@ -1477,6 +1574,9 @@ void adiscope::ToolLauncher::enableDacBasedTools()
 
 	if (m_adc_tools_failed || m_dac_tools_failed) {
 		disconnect();
+	} else {
+		m_sessionInfo.setLastConnectedFirmware(selectedDev->infoPage()->getFirmwareVersion());
+		m_sessionInfo.setLastConnectedSerialNumber(selectedDev->infoPage()->getSerialNumber());
 	}
 }
 
@@ -1500,78 +1600,84 @@ bool adiscope::ToolLauncher::switchContext(const QString& uri)
 	}
 
 	m_m2k = m2kOpen(ctx, "");
-
-	alive_timer->start(ALIVE_TIMER_TIMEOUT_MS);
+#ifdef LIBM2K_ENABLE_LOG
+	m_m2k->logAllAttributes();
+#endif
 
 	filter = new Filter(ctx);
 
 	calib = new Calibration(ctx, &js_engine);
 	calib->initialize();
 
-	if (filter->compatible(TOOL_PATTERN_GENERATOR)
-	    || filter->compatible(TOOL_DIGITALIO)) {
-		dioManager = new DIOManager(ctx, filter);
-	}
+	try {
+		if (filter->compatible(TOOL_PATTERN_GENERATOR)
+				|| filter->compatible(TOOL_DIGITALIO)) {
+			dioManager = new DIOManager(ctx, filter);
+		}
 
-	if (filter->compatible(TOOL_LOGIC_ANALYZER)
-	    || filter->compatible(TOOL_PATTERN_GENERATOR)) {
+		if (filter->compatible(TOOL_LOGIC_ANALYZER)
+				|| filter->compatible(TOOL_PATTERN_GENERATOR)) {
 
-		if (!m_use_decoders) {
-			search_timer->stop();
-
-			QMessageBox info(this);
-			info.setText(tr("Digital decoders support is disabled. Some features may be missing"));
-			info.exec();
-		} else {
-			bool success = loadDecoders(QCoreApplication::applicationDirPath() +
-						    "/decoders");
-
-			if (!success) {
+			if (!m_use_decoders) {
 				search_timer->stop();
 
-				QMessageBox error(this);
-				error.setText(tr("There was a problem initializing libsigrokdecode. Some features may be missing"));
-				error.exec();
+				QMessageBox info(this);
+				info.setText(tr("Digital decoders support is disabled. Some features may be missing"));
+				info.exec();
+			} else {
+				bool success = loadDecoders(QCoreApplication::applicationDirPath() +
+							    "/decoders");
+
+				if (!success) {
+					search_timer->stop();
+
+					QMessageBox error(this);
+					error.setText(tr("There was a problem initializing libsigrokdecode. Some features may be missing"));
+					error.exec();
+				}
 			}
 		}
+
+		if (filter->compatible(TOOL_DIGITALIO)) {
+			dio = new DigitalIO(nullptr, filter, menu->getToolMenuItemFor(TOOL_DIGITALIO),
+					    dioManager, &js_engine, this);
+			toolList.push_back(dio);
+			connect(dio, &DigitalIO::showTool, [=]() {
+				menu->getToolMenuItemFor(TOOL_DIGITALIO)->getToolBtn()->click();
+			});
+		}
+
+
+		if (filter->compatible(TOOL_POWER_CONTROLLER)) {
+			power_control = new PowerController(ctx, menu->getToolMenuItemFor(TOOL_POWER_CONTROLLER),
+							    &js_engine, this);
+			toolList.push_back(power_control);
+			connect(power_control, &PowerController::showTool, [=]() {
+				menu->getToolMenuItemFor(TOOL_POWER_CONTROLLER)->getToolBtn()->click();
+			});
+		}
+
+		if (filter->compatible(TOOL_LOGIC_ANALYZER)) {
+			logic_analyzer = new logic::LogicAnalyzer(ctx, filter, menu->getToolMenuItemFor(TOOL_LOGIC_ANALYZER),
+								  &js_engine, this);
+			toolList.push_back(logic_analyzer);
+			connect(logic_analyzer, &logic::LogicAnalyzer::showTool, [=]() {
+				menu->getToolMenuItemFor(TOOL_LOGIC_ANALYZER)->getToolBtn()->click();
+			});
+		}
+
+
+		if (filter->compatible((TOOL_PATTERN_GENERATOR))) {
+			pattern_generator = new logic::PatternGenerator(ctx, filter,
+									menu->getToolMenuItemFor(TOOL_PATTERN_GENERATOR), &js_engine, dioManager, this);
+			toolList.push_back(pattern_generator);
+			connect(pattern_generator, &logic::PatternGenerator::showTool, [=]() {
+				menu->getToolMenuItemFor(TOOL_PATTERN_GENERATOR)->getToolBtn()->click();
+			});
+		}
 	}
-
-	if (filter->compatible(TOOL_DIGITALIO)) {
-		dio = new DigitalIO(nullptr, filter, menu->getToolMenuItemFor(TOOL_DIGITALIO),
-				dioManager, &js_engine, this);
-		toolList.push_back(dio);
-		connect(dio, &DigitalIO::showTool, [=]() {
-			menu->getToolMenuItemFor(TOOL_DIGITALIO)->getToolBtn()->click();
-		});
-	}
-
-
-	if (filter->compatible(TOOL_POWER_CONTROLLER)) {
-		power_control = new PowerController(ctx, menu->getToolMenuItemFor(TOOL_POWER_CONTROLLER),
-				&js_engine, this);
-		toolList.push_back(power_control);
-		connect(power_control, &PowerController::showTool, [=]() {
-			menu->getToolMenuItemFor(TOOL_POWER_CONTROLLER)->getToolBtn()->click();
-		});
-	}
-
-	if (filter->compatible(TOOL_LOGIC_ANALYZER)) {
-		logic_analyzer = new logic::LogicAnalyzer(ctx, filter, menu->getToolMenuItemFor(TOOL_LOGIC_ANALYZER),
-		&js_engine, this);
-		toolList.push_back(logic_analyzer);
-		connect(logic_analyzer, &logic::LogicAnalyzer::showTool, [=]() {
-		     menu->getToolMenuItemFor(TOOL_LOGIC_ANALYZER)->getToolBtn()->click();
-		});
-	}
-
-
-	if (filter->compatible((TOOL_PATTERN_GENERATOR))) {
-		pattern_generator = new logic::PatternGenerator(ctx, filter,
-				 menu->getToolMenuItemFor(TOOL_PATTERN_GENERATOR), &js_engine, dioManager, this);
-		toolList.push_back(pattern_generator);
-		connect(pattern_generator, &logic::PatternGenerator::showTool, [=]() {
-			 menu->getToolMenuItemFor(TOOL_PATTERN_GENERATOR)->getToolBtn()->click();
-		});
+	catch (libm2k::m2k_exception &e) {
+		return false;
 	}
 
 	connect(menu->getToolMenuItemFor(TOOL_NETWORK_ANALYZER)->getToolStopBtn(),
@@ -1708,6 +1814,8 @@ void ToolLauncher::toolDetached(bool detached)
 	}
 
 	tool->setVisible(detached);
+
+	tool->setMinimumSize(910, 490);
 }
 
 void ToolLauncher::closeEvent(QCloseEvent *event)
@@ -1738,6 +1846,11 @@ Preferences *ToolLauncher::getPrefPanel() const
 Calibration *ToolLauncher::getCalibration() const
 {
 	return calib;
+}
+
+PhoneHome *ToolLauncher::getPhoneHome() const
+{
+	return m_phoneHome;
 }
 
 bool ToolLauncher::eventFilter(QObject *watched, QEvent *event)

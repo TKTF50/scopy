@@ -27,8 +27,14 @@
 #include <QPushButton>
 #include <QFuture>
 #include <QLabel>
+#include <QTimer>
 
 #include "iio.h"
+
+#include "phonehome.h"
+#include "libm2k/contextbuilder.hpp"
+#include "libm2k/context.hpp"
+
 
 namespace Ui {
 class InfoPage;
@@ -44,13 +50,14 @@ class InfoPage : public QWidget
 public:
 	explicit InfoPage(QString uri,
 			  Preferences* prefPanel,
+			  PhoneHome* phoneHome,
 			  struct iio_context *ctx = nullptr,
 			  QWidget *parent = 0);
 	virtual ~InfoPage();
 
 
 	struct iio_context *ctx() const;
-	void setCtx(iio_context *ctx);
+	virtual void setCtx(iio_context *ctx);
 
 	QString uri() const;
 	void setUri(QString uri);
@@ -66,6 +73,9 @@ public:
 	void setConnectionStatus(bool);
 	bool supportsIdentification();
 	bool supportsCalibration();
+
+	QString getFirmwareVersion() const;
+	QString getSerialNumber() const;
 
 public Q_SLOTS:
 	void readPreferences();
@@ -105,6 +115,7 @@ protected:
 	QTimer *m_blink_timer;
 	bool m_connected;
 	bool m_search_interrupted;
+	PhoneHome* m_phoneHome;
 };
 
 
@@ -114,20 +125,31 @@ class M2kInfoPage : public InfoPage
 public:
 	explicit M2kInfoPage(QString uri,
 			     Preferences* prefPanel,
+				 PhoneHome* phoneHome,
 			     struct iio_context *ctx = nullptr,
-			     QWidget *parent = 0);
+				 QWidget *parent = 0);
 	~M2kInfoPage();
-	void getDeviceInfo();
+
+	void getDeviceInfo() override;
+	void updateFwVersionWidget();
+	void setCtx(iio_context *ctx) override;
+	int checkLatestFwVersion(const QString &currentVersion) const;
 
 protected:
 	virtual void startIdentification(bool);
 
 private Q_SLOTS:
 	void blinkTimeout();
+public Q_SLOTS:
+	void refreshTemperature();
+	void m2kRegistration();
 
 private:
 	struct iio_channel *m_fabric_channel;
 	QFuture<void> calibration_thread;
+	libm2k::context::M2k *m_m2k;
+	QTimer *m_refreshTemperatureTimer;
+	const int m_temperatureUpdateInterval = 5000;
 };
 
 
@@ -142,13 +164,14 @@ public:
 	static InfoPage* newPage(InfoPageType page_type,
 				 QString uri,
 				 Preferences* prefPanel,
+				 PhoneHome* phoneHome,
 				 struct iio_context *ctx = nullptr,
 				 QWidget *parent = 0)
 	{
 		switch (page_type) {
-		case GENERIC: return new InfoPage(uri, prefPanel,
+		case GENERIC: return new InfoPage(uri, prefPanel, phoneHome,
 						  ctx, parent);
-		case M2K: return new M2kInfoPage(uri, prefPanel,
+		case M2K: return new M2kInfoPage(uri, prefPanel, phoneHome,
 						 ctx, parent);
 		}
 		return nullptr;

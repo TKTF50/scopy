@@ -41,6 +41,7 @@
 #include "oscilloscope.hpp"
 #include "power_controller.hpp"
 #include "signal_generator.hpp"
+#include "scopyaboutdialog.hpp"
 
 #include "logicanalyzer/logic_analyzer.h"
 #include "patterngenerator/pattern_generator.h"
@@ -53,6 +54,7 @@
 #include "device_widget.hpp"
 #include "connectDialog.hpp"
 #include "toolmenu.h"
+#include "session_info.h"
 
 extern "C" {
 	struct iio_context;
@@ -92,6 +94,8 @@ public:
 
 	bool hasNativeDialogs() const;
 	void setNativeDialogs(bool nativeDialogs);
+
+	PhoneHome *getPhoneHome() const;
 
 Q_SIGNALS:
 	void connectionDone(bool success);
@@ -190,6 +194,7 @@ private:
 	Ui::ToolLauncher *ui;
 	struct iio_context *ctx;
 	libm2k::context::M2k *m_m2k;
+	ScopyAboutDialog *about;
 
 	ToolMenu *menu;
 
@@ -257,6 +262,7 @@ private:
 
 	DeviceWidget* selectedDev;
 	bool m_use_decoders;
+	bool m_logging_enable;
 
 	bool m_useNativeDialogs;
 
@@ -265,6 +271,10 @@ private:
 	void _setupToolMenu();
 	void saveRunningToolsBeforeCalibration();
 	void stopToolsBeforeCalibration();
+
+	PhoneHome* m_phoneHome;
+
+	SessionInfo m_sessionInfo;
 };
 }
 #endif // M2K_TOOL_LAUNCHER_H

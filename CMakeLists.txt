@@ -18,12 +18,32 @@
 
 
 cmake_minimum_required(VERSION 3.5)
-project(scopy LANGUAGES CXX VERSION 1.2.0)
+project(scopy LANGUAGES CXX VERSION 1.3.0)
 
 set(Python_ADDITIONAL_VERSIONS 3)
 FIND_PACKAGE(PythonInterp REQUIRED)
 set(PYTHON_VERSION python${PYTHON_VERSION_MAJOR}.${PYTHON_VERSION_MINOR})
 
+
+function(dump_cmake_variables)
+    get_cmake_property(_variableNames VARIABLES)
+    list (SORT _variableNames)
+    foreach (_variableName ${_variableNames})
+	if (ARGV0)
+	    unset(MATCHED)
+	    string(REGEX MATCH ${ARGV0} MATCHED ${_variableName})
+	    if (NOT MATCHED)
+		continue()
+	    endif()
+	endif()
+	message(STATUS "${_variableName}=${${_variableName}}")
+    endforeach()
+endfunction()
+
+
+function(create_build_info_html_pages)
+
+endfunction()
 # Get the GIT hash of the latest commit
 include(FindGit OPTIONAL)
 if (GIT_FOUND)
@@ -33,15 +53,12 @@ if (GIT_FOUND)
 		OUTPUT_VARIABLE SCOPY_GIT_REPO
 		OUTPUT_STRIP_TRAILING_WHITESPACE
 	)
-
-	if (${SCOPY_GIT_REPO} MATCHES ${CMAKE_CURRENT_SOURCE_DIR})
-		execute_process(
-			COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
-			WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-			OUTPUT_VARIABLE SCOPY_VERSION_GIT
-			OUTPUT_STRIP_TRAILING_WHITESPACE
-		)
-	endif()
+	execute_process(
+		COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+		WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+		OUTPUT_VARIABLE SCOPY_VERSION_GIT
+		OUTPUT_STRIP_TRAILING_WHITESPACE
+	)
 endif()
 
 if (NOT SCOPY_VERSION_GIT)
@@ -76,9 +93,15 @@ set_source_files_properties(${TS_FILES} PROPERTIES OUTPUT_LOCATION ${CMAKE_CURRE
 # Generate .qm files from the .ts files
 qt5_add_translation(QM_FILES ${TS_FILES})
 
+set(TRANSLATIONS)
+foreach(file ${TS_FILES})
+	get_filename_component(file_name ${file} NAME_WE)
+	set(TRANSLATIONS "${TRANSLATIONS}\n<file>${file_name}.qm</file>")
+endforeach()
+
 configure_file(${CMAKE_SOURCE_DIR}/resources/translations.qrc
 	${CMAKE_BINARY_DIR}/translations.qrc
-	COPYONLY)
+	@ONLY)
 
 qt5_add_resources(TRANSLATION_RESOURCES ${CMAKE_BINARY_DIR}/translations.qrc)
 
@@ -107,7 +130,7 @@ endif()
 
 
 option(BREAKPAD_HANDLER "Build with breakpad exception handler " OFF)
-message(BREAKPAD_HANDLER - ${BREAKPAD_HANDLER})
+message(STATUS BREAKPAD_HANDLER - ${BREAKPAD_HANDLER})
 if (${BREAKPAD_HANDLER})
 	message("-- Building with breakpad crash handler")
 	set(BREAKPAD_HANDLER_BOOL 1)
@@ -150,8 +173,16 @@ endif()
 
 find_library(QWTPOLAR_LIBRARIES qwtpolar)
 find_path(QWTPOLAR_INCLUDE_DIRS qwt_polar_plot.h PATH_SUFFIXES qwt)
-if (NOT QWTPOLAR_LIBRARIES OR NOT QWTPOLAR_INCLUDE_DIRS)
-	message(SEND_ERROR "QwtPolar not found")
+if (QWTPOLAR_LIBRARIES)
+	message(STATUS "QwtPolar libraries found - ${QWTPOLAR_LIBRARIES}")
+else()
+	message(STATUS "QwtPolar libraries not found - assuming they are built in Qwt")
+	set(QWTPOLAR_LIBRARIES "")
+endif()
+if (NOT QWTPOLAR_INCLUDE_DIRS)
+	message(SEND_ERROR "QwtPolar includes not found")
+else()
+	message(STATUS "Found QwtPolar include files - ${QWTPOLAR_INCLUDE_DIRS}/qwt_polar_plot.h")
 endif()
 
 find_package(PkgConfig)
@@ -182,6 +213,7 @@ include_directories(
 	${CMAKE_SOURCE_DIR}/src
 	${BREAKPAD_INCLUDE_DIRS}
 	${BREAKPAD_INCLUDE_DIRS}/breakpad
+	${CMAKE_CURRENT_SOURCE_DIR}/iio-emu
 )
 
 link_directories(
@@ -200,7 +232,7 @@ FILE(GLOB SRC_LIST  src/*.cpp src/*.cc
 FILE(GLOB M2KSCOPE_UIS ui/patterns/*.ui ui/*.ui)
 qt5_wrap_ui (m2kscope_FORMS_HEADERS ${M2KSCOPE_UIS})
 
-FILE(GLOB M2KSCOPE_RESOURCES resources/*.qrc)
+FILE(GLOB M2KSCOPE_RESOURCES resources/resources.qrc)
 qt5_add_resources(m2kscope_RESOURCES ${M2KSCOPE_RESOURCES})
 
 if (WIN32)
@@ -258,8 +290,65 @@ if (ENABLE_APPLICATION_BUNDLE)
 	set(EXTRA_BUNDLE_FILES ${QT_PLUGINS} ${ICON_FILE} ${PKGINFO} ${QT_CONF} ${DECODERS})
 endif()
 
-# Creates translation .ts files from ${CMAKE_SOURCE_DIR}
-#qt5_create_translation(QM_FILES ${CMAKE_SOURCE_DIR} ${TS_FILES}
+#dump_cmake_variables("iio")
+
+string(TIMESTAMP TODAY "%Y-%m-%d")
+string(TIMESTAMP NOW "%H:%M:%S")
+cmake_host_system_information(RESULT BUILD_HOST QUERY HOSTNAME)
+
+set(APPVEYOR_INFO)
+if($ENV{APPVEYOR})
+	set(APPVEYOR_INFO ${APPVEYOR_INFO}Built\ on\ Appveyor\n)
+	set(APPVEYOR_INFO ${APPVEYOR_INFO}url:\ $ENV{APPVEYOR_URL}\n)
+	set(APPVEYOR_INFO ${APPVEYOR_INFO}api_url:\ $ENV{APPVEYOR_API_URL}\n)
+	set(APPVEYOR_INFO ${APPVEYOR_INFO}acc_name:\ $ENV{APPVEYOR_ACCOUNT_NAME}\n)
+	set(APPVEYOR_INFO ${APPVEYOR_INFO}prj_name:\ $ENV{APPVEYOR_PROJECT_NAME}\n)
+	set(APPVEYOR_INFO ${APPVEYOR_INFO}build_id:\ $ENV{APPVEYOR_BUILD_ID}\n)
+	set(APPVEYOR_INFO ${APPVEYOR_INFO}build_nr:\ $ENV{APPVEYOR_BUILD_NUMBER}\n)
+	set(APPVEYOR_INFO ${APPVEYOR_INFO}build_version:\ $ENV{APPVEYOR_BUILD_VERSION}\n)
+	set(APPVEYOR_INFO ${APPVEYOR_INFO}job_id:\ $ENV{APPVEYOR_JOB_ID}\n)
+	set(APPVEYOR_INFO ${APPVEYOR_INFO}job_name:\ $ENV{APPVEYOR_JOB_NAME}\n)
+	set(APPVEYOR_INFO ${APPVEYOR_INFO}job_nr:\ $ENV{APPVEYOR_JOB_NUMBER}\n)
+	set(APPVEYOR_INFO ${APPVEYOR_INFO}job_link:\ $ENV{APPVEYOR_URL}/project/$ENV{APPVEYOR_ACCOUNT_NAME}/$ENV{APPVEYOR_PROJECT_NAME}/builds/$ENV{APPVEYOR_BUILD_ID}/job/$ENV{APPVEYOR_JOB_ID}\n)		
+	if(EXISTS ${CMAKE_SOURCE_DIR}/scopy-mingw-build-status)
+		message(scopy-mingw-build-status found .. populating)
+		FILE(READ ${CMAKE_SOURCE_DIR}/scopy-mingw-build-status SCOPY_MINGW_BUILD_STATUS_INFO)
+	endif()
+else()
+	set(APPVEYOR_INFO ${APPVEYOR_INFO}Built\ locally\n)
+endif()
+
+# TODO: Pack these in a GLOB and run foreach
+configure_file(resources/buildinfo.html.cmakein ${CMAKE_CURRENT_BINARY_DIR}/buildinfo.html)
+configure_file(resources/scopy_osp.html.cmakein ${CMAKE_CURRENT_BINARY_DIR}/scopy_osp.html)
+configure_file(resources/credits.html.cmakein ${CMAKE_CURRENT_BINARY_DIR}/credits.html)
+configure_file(resources/about.html.cmakein ${CMAKE_CURRENT_BINARY_DIR}/about.html)
+
+SET(ABOUT_HTML_SOURCES ${CMAKE_CURRENT_BINARY_DIR}/resources/buildinfo.html ${CMAKE_CURRENT_BINARY_DIR}/resources/scopy_osp.html ${CMAKE_CURRENT_BINARY_DIR}/resources/credits.html ${CMAKE_CURRENT_BINARY_DIR}/resources/about.html)
+
+set(ABOUT_HTML_QRC_SOURCES)
+foreach(file ${ABOUT_HTML_SOURCES})
+	get_filename_component(file_name ${file} NAME)
+	set(ABOUT_HTML_QRC_SOURCES "${ABOUT_HTML_QRC_SOURCES}\n<file>${file_name}</file>")
+endforeach()
+
+configure_file(${CMAKE_SOURCE_DIR}/resources/aboutpage.qrc
+	${CMAKE_BINARY_DIR}/aboutpage.qrc
+	@ONLY)
+
+qt5_add_resources(ABOUT_PAGE_RESOURCES ${CMAKE_CURRENT_BINARY_DIR}/aboutpage.qrc)
+
+option(CLONE_IIO_EMU "Clone iio-emu" ON)
+if (CLONE_IIO_EMU)
+	message(STATUS "Checking for iio-emu")
+	execute_process(COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive
+			WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+			RESULT_VARIABLE GIT_SUBMOD_RESULT)
+	if(NOT GIT_SUBMOD_RESULT EQUAL "0")
+		message(FATAL_ERROR "git submodule update --init failed with ${GIT_SUBMOD_RESULT}, please checkout submodules")
+	endif()
+	add_subdirectory(iio-emu)
+endif()
 
 add_executable(${PROJECT_NAME} WIN32 ${OSX_BUNDLE}
 		${SRC_LIST}
@@ -268,11 +357,13 @@ add_executable(${PROJECT_NAME} WIN32 ${OSX_BUNDLE}
 		${m2kscope_FORMS_HEADERS}
 		${EXTRA_BUNDLE_FILES}
 		${TRANSLATION_RESOURCES}
+		${ABOUT_PAGE_RESOURCES}
 )
 
 if (WIN32 OR ENABLE_APPLICATION_BUNDLE)
 	set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME Scopy)
 endif()
+
 target_link_libraries(${PROJECT_NAME} LINK_PRIVATE
 		${BREAKPAD_LIBRARIES}
 		${BREAKPADCLIENT_LIBRARIES}
@@ -340,8 +431,7 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 set(CMAKE_INSTALL_DOCDIR "${CMAKE_CURRENT_BINARY_DIR}/doc")
 find_package(Doxygen)
 if(DOXYGEN_FOUND)
-	option(WITH_DOC "Generate documentation with Doxygen" ON)
-
+	option(WITH_DOC "Generate documentation with Doxygen" OFF)
 	if (WITH_DOC)
 		configure_file(${CMAKE_CURRENT_SOURCE_DIR}/doc/Doxyfile_API.in ${CMAKE_CURRENT_BINARY_DIR}/doc/Doxyfile @ONLY)
 		set(HTML_DEST_DIR ${CMAKE_CURRENT_BINARY_DIR})

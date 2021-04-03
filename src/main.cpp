@@ -32,6 +32,13 @@
 #include "tool_launcher.hpp"
 #include "scopyApplication.hpp"
 #include <stdio.h>
+#ifdef LIBM2K_ENABLE_LOG
+#include <glog/logging.h>
+#endif
+
+//#include "coloreditor.h"
+#include "scopy_color_editor.h"
+#include "application_restarter.h"
 
 
 using namespace adiscope;
@@ -39,6 +46,12 @@ using namespace adiscope;
 int main(int argc, char **argv)
 {
 	ScopyApplication app(argc, argv);
+#ifdef LIBM2K_ENABLE_LOG
+	enableLogging(true);
+	google::InitGoogleLogging(argv[0]);
+	FLAGS_logbuflevel = -1;
+#endif
+
 #if BREAKPAD_HANDLER
 #ifdef Q_OS_LINUX
 	google_breakpad::MinidumpDescriptor descriptor("/tmp");
@@ -62,13 +75,7 @@ int main(int argc, char **argv)
 	QFont font("Open Sans");
 	app.setFont(font);
 
-	if (app.styleSheet().isEmpty()) {
-		QFile file(":/stylesheets/stylesheets/global.qss");
-		file.open(QFile::ReadOnly);
-
-		QString stylesheet = QString::fromLatin1(file.readAll());
-		app.setStyleSheet(stylesheet);
-	}
+	ApplicationRestarter restarter(QString::fromLocal8Bit(argv[0]));
 
 #ifdef WIN32
 	auto pythonpath = qgetenv("SCOPY_PYTHONPATH");
@@ -111,6 +118,8 @@ int main(int argc, char **argv)
 
 	parser.process(app);
 
+	restarter.setArguments(parser.positionalArguments());
+
 	QTranslator myappTranslator;
 
 	// TODO: Use Preferences_API to get language key - cannot be done right now
@@ -139,6 +148,20 @@ int main(int argc, char **argv)
 	app.installTranslator(&myappTranslator);
 
 	ToolLauncher launcher(prevCrashDump);
+
+	ScopyColorEditor *colorEditor = new ScopyColorEditor(&app);
+	colorEditor->setVisible(false);
+
+	QString currentStylesheet = pref.value(QString("Preferences/currentStylesheet")).toString();
+	QStringList userStylesheets = pref.value(QString("Preferences/userStylesheets")).toStringList();
+	colorEditor->setUserStylesheets(userStylesheets);
+	colorEditor->setCurrentStylesheet(currentStylesheet);
+
+	if (app.styleSheet().isEmpty()) {
+		app.setStyleSheet(colorEditor->getStyleSheet());
+	}
+
+	launcher.getPrefPanel()->setColorEditor(colorEditor);
 
 	bool nogui = parser.isSet("nogui");
 	bool nodecoders = parser.isSet("nodecoders");
@@ -181,6 +204,6 @@ int main(int argc, char **argv)
 				 Q_ARG(QString, contents),
 				 Q_ARG(QString, script));
 	}
-	return app.exec();
+	return restarter.restart(app.exec());
 }
 

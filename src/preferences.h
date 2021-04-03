@@ -26,6 +26,8 @@
 #include <QSettings>
 
 #include "apiObject.hpp"
+//#include "coloreditor.h"
+#include "scopy_color_editor.h"
 
 
 namespace Ui {
@@ -100,6 +102,7 @@ public:
 	bool getDigital_decoders_enabled() const;
 	void setDigital_decoders_enabled(bool value);
 
+
 	bool getShowADCFilters() const ;
 	void setShowADCFilters(bool value);
  
@@ -123,10 +126,26 @@ public:
 	bool getSkipCalIfCalibrated() const;
 	void setSkipCalIfCalibrated(bool val);
 
+	bool getAutomatical_version_checking_enabled() const;
+	void setAutomatical_version_checking_enabled(bool value);
+
+	QString getCheck_updates_url() const;
+	void setCheck_update_url(const QString &link);
+
+	bool getFirst_application_run() const;
+	void setFirst_application_run(bool value);
+
+	void requestRestart();
+	void setColorEditor(ScopyColorEditor *colorEditor);
+
+	bool getLogging_enabled() const;
+	void setLogging_enabled(bool value);
+
 Q_SIGNALS:
 
 	void notify();
 	void reset();
+	void requestUpdateCheck();
 
 public Q_SLOTS:
 	
@@ -159,6 +178,9 @@ private:
 	bool show_ADC_digital_filters;
 	bool mini_hist_enabled;
 	bool digital_decoders_enabled;
+	bool automatical_version_checking_enabled;
+	QString check_updates_url;
+	bool first_application_run;
 	bool m_initialized;
 	bool m_useNativeDialogs;
 	QString language;
@@ -167,8 +189,11 @@ private:
 	bool m_debug_messages_active;
 	bool m_attemptTempLutCalib;
 	bool m_skipCalIfCalibrated;
+	bool m_logging_enabled;
 
 	Preferences_API *pref_api;
+
+	ScopyColorEditor *m_colorEditor;
 };
 
 class Preferences_API : public ApiObject
@@ -198,6 +223,11 @@ class Preferences_API : public ApiObject
 	Q_PROPERTY(bool debug_messages_active READ getDebugMessagesActive WRITE setDebugMessagesActive)
 	Q_PROPERTY(bool attemptTempLutCalib READ getAttemptTempLutCalib WRITE setAttemptTempLutCalib)
 	Q_PROPERTY(bool skipCalIfCalibrated READ getSkipCalIfCalibrated WRITE setSkipCalIfCalibrated)
+	Q_PROPERTY(bool automatical_version_checking_enabled READ getAutomaticalVersionCheckingEnabled WRITE setAutomaticalVersionCheckingEnabled)
+	Q_PROPERTY(QString check_updates_url READ getCheckUpdatesUrl WRITE setCheckUpdatesUrl)
+	Q_PROPERTY(bool first_application_run READ getFirstApplicationRun WRITE setFirstApplicationRun)
+	Q_PROPERTY(QString currentStylesheet READ getCurrentStylesheet WRITE setCurrentStylesheet)
+	Q_PROPERTY(QStringList userStylesheets READ getUserStylesheets WRITE setUserStylesheets)
 
 
 public:
@@ -271,6 +301,21 @@ public:
 
 	bool getSkipCalIfCalibrated() const;
 	void setSkipCalIfCalibrated(bool val);
+
+	bool getAutomaticalVersionCheckingEnabled() const;
+	void setAutomaticalVersionCheckingEnabled(const bool& enabled);
+
+	QString getCheckUpdatesUrl() const;
+	void setCheckUpdatesUrl(const QString& link);
+
+	bool getFirstApplicationRun() const;
+	void setFirstApplicationRun(const bool& first);
+
+	QString getCurrentStylesheet() const;
+	void setCurrentStylesheet(const QString &currentStylesheet);
+
+	QStringList getUserStylesheets() const;
+	void setUserStylesheets(const QStringList &userStylesheets);
 
 private:
 	Preferences *preferencePanel;

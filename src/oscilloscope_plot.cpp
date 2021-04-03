@@ -83,10 +83,11 @@ CapturePlot::CapturePlot(QWidget *parent,
 	d_startedGrouping(false),
 	d_bottomHandlesArea(nullptr),
 	d_xAxisInterval{0.0, 0.0},
-	d_currentHandleInitPx(1)
+	d_currentHandleInitPx(30),
+	d_maxBufferError(nullptr)
 {
-	setMinimumHeight(250);
-	setMinimumWidth(500);
+	setMinimumHeight(200);
+	setMinimumWidth(450);
 
 	/* Initial colors scheme */
 	d_trigAactiveLinePen = QPen(QColor(255, 255, 255), 2, Qt::SolidLine);
@@ -150,15 +151,16 @@ CapturePlot::CapturePlot(QWidget *parent,
 
 	// Sample Rate and Buffer Size
 	d_sampleRateLabel = new QLabel("", this);
-	d_sampleRateLabel->setStyleSheet("QLabel {"
-		"color: #ffffff;"
-		"}");
 
 	// Trigger State
 	d_triggerStateLabel = new QLabel(this);
-	d_triggerStateLabel->setStyleSheet("QLabel {"
-		"color: #ffffff;"
+
+	d_maxBufferError = new QLabel(this);
+	d_maxBufferError->setStyleSheet("QLabel {"
+		"color: #ff0000;"
 		"}");
+
+	d_maxBufferError->setWordWrap(true);
 
 	// Top area layout
 	QHBoxLayout *topWidgetLayout = new QHBoxLayout(d_topWidget);
@@ -171,7 +173,9 @@ CapturePlot::CapturePlot(QWidget *parent,
 		Qt::AlignBottom);
 	topWidgetLayout->insertWidget(1, d_sampleRateLabel, 0, Qt::AlignLeft |
 		Qt::AlignBottom);
-	topWidgetLayout->insertWidget(2, d_triggerStateLabel, 0, Qt::AlignRight |
+	topWidgetLayout->insertWidget(2, d_maxBufferError, 0, Qt::AlignRight |
+		Qt::AlignBottom);
+	topWidgetLayout->insertWidget(3, d_triggerStateLabel, 0, Qt::AlignRight |
 		Qt::AlignBottom);
 
 	QSpacerItem *spacerItem = new QSpacerItem(0, 0, QSizePolicy::Expanding,
@@ -1047,6 +1051,11 @@ void CapturePlot::printWithNoBackground(const QString& toolName, bool editScaleD
 	DisplayPlot::printWithNoBackground(toolName, editScaleDraw);
 }
 
+int CapturePlot::getAnalogChannels() const
+{
+	return d_ydata.size() + d_ref_ydata.size();
+}
+
 void CapturePlot::setHorizCursorsLocked(bool value)
 {
 	horizCursorsLocked = value;
@@ -1439,37 +1448,8 @@ void CapturePlot::removeDigitalPlotCurve(QwtPlotCurve *curve)
 {
 	for (int i = 0; i < d_offsetHandles.size(); ++i) {
 		if (curve == getDigitalPlotCurve(i)) {
-
-//			auto hdl = d_offsetHandles.at(i);
-//			qDebug() << "Removed id: " << i;
-//			for (auto &group : d_groupHandles) {
-//				group.removeOne(hdl);
-//				if (!group.isEmpty()) {
-//					group.first()->triggerMove();
-//				}
-//			}
-			// remove digital plot curves
-			// TODO: always keep digital stuff at the end ch1 ch2 ref1 ref2 d1 d2 ...
-			// add ref3 -> ch1 ch2 ref1 ref2 ref3 d1 d2 ...
 			removeOffsetWidgets(d_ydata.size() + d_ref_ydata.size() + i);
-
-//			int groupIndx = -1;
-//			for (int i = 0; i < d_groupHandles.size(); ++i) {
-//				if (d_groupHandles[i].size() < 2) {
-//					groupIndx = i;
-//				}
-//			}
-
-//			if (groupIndx != -1) {
-//				d_groupHandles.removeAt(groupIndx);
-//			}
-
-//			if (d_groupMarkers.size() > d_groupHandles.size()){
-//				auto marker = d_groupMarkers.takeLast();
-//				marker->detach();
-//				delete marker;
-//			}
-
+			removeLeftVertAxis(d_ydata.size() + d_ref_ydata.size() + i);
 			break;
 		}
 	}
@@ -1501,7 +1481,6 @@ void CapturePlot::addToGroup(int currentGroup, int toAdd)
 
 void CapturePlot::onDigitalChannelAdded(int chnIdx)
 {
-	qDebug() << "Digital Channel Added!";
 	setLeftVertAxesCount(d_ydata.size() + d_ref_ydata.size() + chnIdx + 1);
 	setAxisScale( QwtAxisId(QwtPlot::yLeft, d_ydata.size() + d_ref_ydata.size() + chnIdx), -5, 5);
 	replot();
@@ -1886,6 +1865,16 @@ void CapturePlot::positionInGroupChanged(int chnIdx, int from, int to)
 
 void CapturePlot::setGroups(const QVector<QVector<int> > &groups)
 {
+	auto selectedHandleIt = std::find_if(d_offsetHandles.begin(), d_offsetHandles.end(),
+					  [](RoundedHandleV *handle){
+		return handle->isSelected();
+	});
+
+	if (selectedHandleIt != d_offsetHandles.end()) {
+		(*selectedHandleIt)->setSelected(false);
+		(*selectedHandleIt)->selected(false);
+	}
+
 	for (const auto &grp : groups) {
 		if (grp.size() < 2) { continue; }
 		beginGroupSelection();
@@ -1897,6 +1886,11 @@ void CapturePlot::setGroups(const QVector<QVector<int> > &groups)
 		d_groupHandles.back().front()->setSelected(false);
 		d_groupHandles.back().front()->selected(false);
 		d_groupHandles.back().front()->setPosition(d_groupHandles.back().front()->position());
+	}
+
+	if (selectedHandleIt != d_offsetHandles.end()) {
+		(*selectedHandleIt)->setSelected(true);
+		(*selectedHandleIt)->selected(true);
 	}
 
 	replot();
@@ -2015,9 +2009,24 @@ void CapturePlot::handleInGroupChangedPosition(int position)
 	replot();
 }
 
+void adiscope::CapturePlot::pushBackNewOffsetWidgets(RoundedHandleV *chOffsetHdl, HorizBar *chOffsetBar)
+{
+	int indexOfNewChannel = d_ydata.size() - 1;
+	d_offsetBars.insert(indexOfNewChannel, chOffsetBar);
+	d_offsetHandles.insert(indexOfNewChannel, chOffsetHdl);
+
+	for (int i = 0; i < d_offsetBars.size(); ++i) {
+		d_offsetBars[i]->setMobileAxis(QwtAxisId(QwtPlot::yLeft, i));
+	}
+
+	for (int i = 0; i < d_logic_curves.size(); ++i) {
+		d_logic_curves[i]->setAxes(QwtPlot::xBottom, QwtAxisId(QwtPlot::yLeft, d_ydata.size() + d_ref_ydata.size() + i));
+	}
+}
+
 void CapturePlot::onChannelAdded(int chnIdx)
 {
-	setLeftVertAxesCount(chnIdx + 1);
+	setLeftVertAxesCount(d_offsetHandles.size() + 1);
 	QColor chnColor = getLineColor(chnIdx);
 
 	/* Channel offset widget */
@@ -2026,7 +2035,6 @@ void CapturePlot::onChannelAdded(int chnIdx)
 	chOffsetBar->setCanLeavePlot(true);
 	chOffsetBar->setVisible(false);
 	chOffsetBar->setMobileAxis(QwtAxisId(QwtPlot::yLeft, chnIdx));
-	d_offsetBars.push_back(chOffsetBar);
 
 	RoundedHandleV *chOffsetHdl = new RoundedHandleV(
 				QPixmap(":/icons/handle_right_arrow.svg"),
@@ -2036,7 +2044,7 @@ void CapturePlot::onChannelAdded(int chnIdx)
 	chOffsetHdl->setRoundRectColor(chnColor);
 	chOffsetHdl->setPen(QPen(chnColor, 2, Qt::SolidLine));
 	chOffsetHdl->setVisible(true);
-	d_offsetHandles.push_back(chOffsetHdl);
+	pushBackNewOffsetWidgets(chOffsetHdl, chOffsetBar);
 
 	connect(chOffsetHdl, &RoundedHandleV::positionChanged,
 		[=](int pos) {
@@ -2359,6 +2367,15 @@ void CapturePlot::setTriggerState(int triggerState)
 	d_triggerStateLabel->show();
 }
 
+void CapturePlot::setMaxBufferSizeErrorLabel(bool reached, const QString &customWarning)
+{
+	QString errorMessage = "Maximum buffer size reached";
+	if (customWarning.length()) {
+		errorMessage = customWarning;
+	}
+	d_maxBufferError->setText(reached ? errorMessage : "");
+}
+
 void CapturePlot::setCursorReadoutsTransparency(int value)
 {
 	d_cursorReadouts->setTransparency(value);
@@ -2372,8 +2389,10 @@ void CapturePlot::moveCursorReadouts(CustomPlotPositionButton::ReadoutsPosition 
 void CapturePlot::updateBufferSizeSampleRateLabel(int nsamples, double sr)
 {
 	QString txtSampleRate = d_cursorMetricFormatter.format(sr, "sps", 0);
-	QString txtSamplingPeriod = d_cursorTimeFormatter.format(1 / sr, "", 0);
-	QString text = QString("%1 Samples at ").arg(nsamples) + txtSampleRate;
+	d_cursorMetricFormatter.setTrimZeroes(true);
+	QString txtSamples = d_cursorMetricFormatter.format(nsamples, "", 3);
+	d_cursorMetricFormatter.setTrimZeroes(false);
+	QString text = QString("%1 Samples at ").arg(txtSamples) + txtSampleRate;
 	d_sampleRateLabel->setText(text);
 }
 

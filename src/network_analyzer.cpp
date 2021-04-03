@@ -165,6 +165,8 @@ void NetworkAnalyzer::_configureAdcFlowgraph(size_t buffer_size)
 
 	// Build the flowgraph only once
 	m_initFlowgraph = false;
+
+	ui->btnHelp->setUrl("https://wiki.analog.com/university/tools/m2k/scopy/networkanalyzer");
 }
 
 NetworkAnalyzer::NetworkAnalyzer(struct iio_context *ctx, Filter *filt,
@@ -616,7 +618,6 @@ NetworkAnalyzer::NetworkAnalyzer(struct iio_context *ctx, Filter *filt,
 		}
 
 		painter.end();
-		img.invertPixels(QImage::InvertRgb);
 		img.save(fileName, 0, -1);
 	});
 
@@ -1667,7 +1668,15 @@ void NetworkAnalyzer::startStop(bool pressed)
 		m_dBgraph.sweepDone();
 		m_phaseGraph.sweepDone();
 		ui->statusLabel->setText(tr("Stopped"));
-		m_m2k_analogin->setKernelBuffersCount(KERNEL_BUFFERS_DEFAULT);
+		do {
+			try {
+				m_m2k_analogin->setKernelBuffersCount(KERNEL_BUFFERS_DEFAULT);
+				break;
+			} catch (libm2k::m2k_exception &e) {
+				qDebug() << e.what();
+			}
+
+		} while (true);
 	}
 }
 

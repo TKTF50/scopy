@@ -23,6 +23,7 @@
 
 #include <qevent.h>
 #include <QLabel>
+#include <QIcon>
 #include <QGridLayout>
 #include <qwt_plot.h>
 #include <qwt_scale_div.h>
@@ -41,18 +42,19 @@ CursorReadouts::CursorReadouts(QwtPlot *plot):
     vAxis(QwtPlot::yLeft)
 {
 	ui->setupUi(this);
-
 	ui->TimeCursors->setParent(plot->canvas());
 	ui->VoltageCursors->setParent(plot->canvas());
 	this->setGeometry(0, 0, 0, 0);
 
-    plot->canvas()->installEventFilter(this);
+	plot->canvas()->installEventFilter(this);
 
 	ui->TimeCursors->setAttribute(Qt::WA_TransparentForMouseEvents);
 	ui->VoltageCursors->setAttribute(Qt::WA_TransparentForMouseEvents);
 
 	anim = new CustomAnimation(ui->VoltageCursors, "geometry");
 	anim2 = new CustomAnimation(ui->TimeCursors, "geometry");
+
+	setTransparency(0);
 }
 
 CursorReadouts::~CursorReadouts()
@@ -65,15 +67,21 @@ CursorReadouts::~CursorReadouts()
 void CursorReadouts::setTransparency(int value)
 {
 	double percent = (100 - value) / 100.0;
-	QString color = "rgba(20, 20, 22, " + QString::number(percent);
+
+	QString color = "";
+	if (QIcon::themeName() == "scopy-default") {
+		color +="rgba(20, 20, 22, ";
+	} else {
+		color +="rgba(197, 197, 197, ";
+	}
+
+	color += QString::number(percent);
 
 	ui->TimeCursors->setStyleSheet("QWidget {"
 					"background-color: " + color + ");"
-					"color: white;"
 					"}");
 	ui->VoltageCursors->setStyleSheet("QWidget {"
 					"background-color: " + color + ");"
-					"color: white;"
 					"}");
 }
 

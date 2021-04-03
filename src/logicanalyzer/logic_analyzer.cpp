@@ -53,12 +53,15 @@
 #include "osc_export_settings.h"
 #include "filemanager.h"
 #include "config.h"
+#include "state_updater.h"
 
 using namespace adiscope;
 using namespace adiscope::logic;
 
 constexpr int MAX_BUFFER_SIZE_ONESHOT = 4 * 1024 * 1024; // 4M
-constexpr int MAX_BUFFER_SIZE_STREAM = 64 * 4 * 1024 * 1024; // 64 x 4M
+constexpr int MAX_BUFFER_SIZE_STREAM = 1024 * 1024 * 1024; // 1Gb
+constexpr int MAX_SR_STREAM = 5e6; // 10M
+constexpr int MAX_KERNEL_BUFFERS = 64;
 constexpr int DIGITAL_NR_CHANNELS = 16;
 
 /* helper method to sort srd_decoder objects based on ids(name) */
@@ -93,7 +96,7 @@ LogicAnalyzer::LogicAnalyzer(struct iio_context *ctx, adiscope::Filter *filt,
 					{"k samples", 1E+3},
 					{"M samples", 1E+6},
 					{"G samples", 1E+9},
-					}, tr("Nr of samples"), 1,
+					}, tr("Nr of samples"), 1000,
 					MAX_BUFFER_SIZE_ONESHOT,
 					true, false, this, {1, 2, 5})),
 	m_timePositionButton(new PositionSpinButton({
@@ -109,6 +112,7 @@ LogicAnalyzer::LogicAnalyzer(struct iio_context *ctx, adiscope::Filter *filt,
 	m_resetHorizAxisOffset(true),
 	m_captureThread(nullptr),
 	m_stopRequested(false),
+	m_acquisitionStarted(false),
 	m_plotScrollBar(new QScrollBar(Qt::Vertical, this)),
 	m_started(false),
 	m_selectedChannel(-1),
@@ -123,7 +127,9 @@ LogicAnalyzer::LogicAnalyzer(struct iio_context *ctx, adiscope::Filter *filt,
 	m_saveRestoreSettings(nullptr),
 	m_oscPlot(nullptr),
 	m_oscChannelSelected(-1),
-	m_oscDecoderMenu(nullptr)
+	m_oscDecoderMenu(nullptr),
+	m_currentKernelBuffers(4),
+	m_triggerUpdater(new StateUpdater(250, this))
 {
 	// setup ui
 	setupUi();
@@ -132,8 +138,6 @@ LogicAnalyzer::LogicAnalyzer(struct iio_context *ctx, adiscope::Filter *filt,
 	connectSignalsAndSlots();
 
 	m_plot.setLeftVertAxesCount(1);
-
-	// TODO: get number of channels from libm2k;
 
 	for (uint8_t i = 0; i < m_nbChannels; ++i) {
 		QCheckBox *channelBox = new QCheckBox("DIO " + QString::number(i));
@@ -151,9 +155,11 @@ LogicAnalyzer::LogicAnalyzer(struct iio_context *ctx, adiscope::Filter *filt,
 
 		channelBox->setChecked(true);
 
+		triggerBox->setStyleSheet("QComboBox QAbstractItemView { min-width: 130px; }");
+
+		triggerBox->setSizeAdjustPolicy(QComboBox::AdjustToContentsOnFirstShow);
 		for (int i = 1; i < ui->triggerComboBox->count(); ++i) {
-			triggerBox->addItem(ui->triggerComboBox->itemIcon(i),
-					    ui->triggerComboBox->itemText(i));
+			triggerBox->addItem(ui->triggerComboBox->itemText(i));
 		}
 
 		int condition = static_cast<int>(
@@ -218,13 +224,17 @@ LogicAnalyzer::LogicAnalyzer(struct iio_context *ctx, adiscope::Filter *filt,
 
 	m_timePositionButton->setStep(1);
 
-	// default: stream
-	ui->btnStreamOneShot->setChecked(false);
+	// default: oneshot
+	ui->btnStreamOneShot->setChecked(true);
 
 	// default
 	m_sampleRateButton->setValue(m_sampleRate);
 	m_sampleRateButton->setIntegerDivider(m_sampleRateButton->maxValue());
 	m_bufferSizeButton->setValue(m_bufferSize);
+
+	m_triggerUpdater->setOffState(CapturePlot::Stop);
+	connect(m_triggerUpdater, &StateUpdater::outputChanged,
+		&m_plot, &CapturePlot::setTriggerState);
 
 	readPreferences();
 
@@ -238,6 +248,8 @@ LogicAnalyzer::LogicAnalyzer(struct iio_context *ctx, adiscope::Filter *filt,
 	// Scroll wheel event filter
 	m_wheelEventGuard = new MouseWheelWidgetGuard(ui->mainWidget);
 	m_wheelEventGuard->installEventRecursively(ui->mainWidget);
+
+	ui->btnHelp->setUrl("https://wiki.analog.com/university/tools/m2k/scopy/logicanalyzer");
 }
 
 LogicAnalyzer::~LogicAnalyzer()
@@ -250,17 +262,17 @@ LogicAnalyzer::~LogicAnalyzer()
 
 	disconnect(prefPanel, &Preferences::notify, this, &LogicAnalyzer::readPreferences);
 
-	for (auto &curve : m_plotCurves) {
-		m_plot.removeDigitalPlotCurve(curve);
-		delete curve;
-	}
-
 	if (m_captureThread) {
 		m_stopRequested = true;
 		m_m2kDigital->cancelAcquisition();
 		m_captureThread->join();
 		delete m_captureThread;
 		m_captureThread = nullptr;
+	}
+
+	for (auto &curve : m_plotCurves) {
+		m_plot.removeDigitalPlotCurve(curve);
+		delete curve;
 	}
 
 	if (m_buffer) {
@@ -304,6 +316,13 @@ std::vector<QWidget *> LogicAnalyzer::enableMixedSignalView(CapturePlot *osc, in
 	// save the state of the tool
 	m_saveRestoreSettings = std::unique_ptr<SaveRestoreToolSettings>(new SaveRestoreToolSettings(this));
 
+	if (m_started) {
+		auto btn = dynamic_cast<CustomPushButton *>(run_button);
+		if (btn) {
+			btn->setChecked(false);
+		}
+	}
+
 	// disable the menu item for the logic analyzer when mixed signal view is enabled
 	toolMenuItem->setDisabled(true);
 
@@ -313,6 +332,12 @@ std::vector<QWidget *> LogicAnalyzer::enableMixedSignalView(CapturePlot *osc, in
 
 	QTabWidget *tabWidget = new QTabWidget();
 	tabWidget->setMovable(true);
+
+	QScrollArea *generalScrollArea = new QScrollArea();
+	generalScrollArea->setWidgetResizable(true);
+	generalScrollArea->setMinimumSize(220, 300);
+	generalScrollArea->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+	generalScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
 	QWidget *channelEnumerator = new QWidget();
 	QVBoxLayout *layout = new QVBoxLayout();
@@ -342,6 +367,7 @@ std::vector<QWidget *> LogicAnalyzer::enableMixedSignalView(CapturePlot *osc, in
 		});
 
 		QCheckBox *channelBox = new QCheckBox("DIO " + QString::number(i));
+		curve->setName("DIO " + QString::number(i));
 
 		QHBoxLayout *hBoxLayout = new QHBoxLayout(this);
 
@@ -371,9 +397,10 @@ std::vector<QWidget *> LogicAnalyzer::enableMixedSignalView(CapturePlot *osc, in
 		});
 
 		connect(channelBox, &QCheckBox::toggled, [=](bool toggled){
+			const int oscAnalogChannels = m_oscPlot->getAnalogChannels();
 			m_oscPlot->enableDigitalPlotCurve(i, toggled);
-			m_oscPlot->setOffsetWidgetVisible(i + m_oscAnalogChannels, toggled);
-			m_oscPlot->positionInGroupChanged(i + m_oscAnalogChannels, 0, 0);
+			m_oscPlot->setOffsetWidgetVisible(i + oscAnalogChannels, toggled);
+			m_oscPlot->positionInGroupChanged(i + oscAnalogChannels, 0, 0);
 			m_oscPlot->replot();
 		});
 		channelBox->setChecked(false);
@@ -588,9 +615,10 @@ std::vector<QWidget *> LogicAnalyzer::enableMixedSignalView(CapturePlot *osc, in
 		decoderComboBox->setCurrentIndex(0);
 
 		connect(decoderBox, &QCheckBox::toggled, [=](bool toggled){
-			m_oscPlot->enableDigitalPlotCurve(m_oscAnalogChannels + m_nbChannels + itemsInLayout, toggled);
-			m_oscPlot->setOffsetWidgetVisible(m_oscAnalogChannels + m_nbChannels + itemsInLayout, toggled);
-			m_oscPlot->positionInGroupChanged(m_oscAnalogChannels + m_nbChannels + itemsInLayout, 0, 0);
+			const int analogChannels = m_oscPlot->getAnalogChannels();
+			m_oscPlot->enableDigitalPlotCurve(analogChannels + m_nbChannels + itemsInLayout, toggled);
+			m_oscPlot->setOffsetWidgetVisible(analogChannels + m_nbChannels + itemsInLayout, toggled);
+			m_oscPlot->positionInGroupChanged(analogChannels + m_nbChannels + itemsInLayout, 0, 0);
 			m_oscPlot->replot();
 		});
 
@@ -633,7 +661,24 @@ std::vector<QWidget *> LogicAnalyzer::enableMixedSignalView(CapturePlot *osc, in
 	nameLineEdit->setAlignment(Qt::AlignCenter);
 	nameLineEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
+	QLineEdit *traceHeightLineEdit = new QLineEdit();
+	traceHeightLineEdit->setText("");
+	traceHeightLineEdit->setVisible(true);
+	traceHeightLineEdit->setDisabled(true);
+	traceHeightLineEdit->setAlignment(Qt::AlignCenter);
+	traceHeightLineEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+
+	QComboBox *currentChannelTriggerComboBox = new QComboBox();
+	currentChannelTriggerComboBox->addItem("-");
+	for (int i = 1; i < ui->triggerComboBox->count(); ++i) {
+		currentChannelTriggerComboBox->addItem(ui->triggerComboBox->itemIcon(i),
+				    ui->triggerComboBox->itemText(i));
+	}
+
 	currentChannelMenuLayout->addWidget(nameLineEdit);
+	currentChannelMenuLayout->addWidget(traceHeightLineEdit);
+	currentChannelMenuLayout->addWidget(currentChannelTriggerComboBox);
+
 	currentChannelMenuLayout->addLayout(decoderSettingsLayout);
 
 	currentChannelMenu->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
@@ -645,17 +690,97 @@ std::vector<QWidget *> LogicAnalyzer::enableMixedSignalView(CapturePlot *osc, in
 	stackDecoderLayout->insertSpacerItem(0, new QSpacerItem(0, 0, QSizePolicy::Expanding, QSizePolicy::Expanding));
 	stackDecoderLayout->insertWidget(1, stackDecoderComboBox);
 
-	currentChannelMenuLayout->insertItem(-1, new QSpacerItem(0, 0, QSizePolicy::Minimum, QSizePolicy::Expanding));
+	/* Setup external trigger menu */
+	QWidget *externalTrigger = new QWidget(currentChannelMenu);
+	QVBoxLayout *externalTriggerLayout = new QVBoxLayout(externalTrigger);
+	externalTriggerLayout->setContentsMargins(0, 0, 0, 0);
+	externalTrigger->setLayout(externalTriggerLayout);
 
+	QHBoxLayout *externalSubTitle = new QHBoxLayout();
+	auto label = new QLabel("EXTERNAL TRIGGER ");
+
+	externalSubTitle->addWidget(label);
+	externalSubTitle->setContentsMargins(0, 0, 0, 0);
+	externalSubTitle->setSpacing(0);
+
+	QFrame *line = new QFrame(externalTrigger);
+	line->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+	line->setMaximumSize(QSize(16777215, 1));
+	line->setStyleSheet(QString::fromUtf8("border: 1px solid rgba(255, 255, 255, 70);"));
+	line->setFrameShape(QFrame::HLine);
+	line->setFrameShadow(QFrame::Sunken);
+
+	externalSubTitle->addWidget(line);
+
+	externalTriggerLayout->addLayout(externalSubTitle);
+
+	QGridLayout *externalGridLayout = new QGridLayout();
+	auto externalOnOff = new adiscope::CustomSwitch();
+	externalGridLayout->addWidget(externalOnOff, 0, 0);
+	auto labelCondition = new QLabel("Condition");
+	externalGridLayout->addWidget(labelCondition, 1, 0);
+
+	QFile file(":stylesheets/stylesheets/customSwitch.qss");
+	file.open(QFile::ReadOnly);
+	QString styleSheet = QString::fromLatin1(file.readAll());
+	externalOnOff->setStyleSheet(styleSheet);
+
+	auto comboBoxCondition = new QComboBox();
+	externalGridLayout->addWidget(comboBoxCondition, 1, 1);
+
+	comboBoxCondition->setDisabled(true);
+
+	connect(externalOnOff, &CustomSwitch::toggled, [=](bool on){
+		if (on) {
+			comboBoxCondition->setEnabled(true);
+			m_m2kDigital->getTrigger()->setDigitalSource(SRC_TRIGGER_IN);
+			const int condition = comboBoxCondition->currentIndex();
+			m_m2kDigital->getTrigger()->setDigitalExternalCondition(
+						static_cast<libm2k::M2K_TRIGGER_CONDITION_DIGITAL>((condition + 5) % 6));
+		} else {
+			comboBoxCondition->setCurrentIndex(0);
+			comboBoxCondition->setDisabled(true);
+			m_m2kDigital->getTrigger()->setDigitalSource(SRC_NONE);
+		}
+	});
+	comboBoxCondition->addItem("-");
+	for (int i = 1; i < ui->triggerComboBox->count(); ++i) {
+		comboBoxCondition->addItem(ui->triggerComboBox->itemIcon(i),
+				    ui->triggerComboBox->itemText(i));
+	}
+
+	connect(comboBoxCondition, QOverload<int>::of(&QComboBox::currentIndexChanged), [=](int index){
+		m_m2kDigital->getTrigger()->setDigitalExternalCondition(
+					static_cast<libm2k::M2K_TRIGGER_CONDITION_DIGITAL>((index + 5) % 6));
+	});
+
+	externalTriggerLayout->addLayout(externalGridLayout);
+
+	layout->addWidget(externalTrigger);
+
+	currentChannelMenuLayout->insertItem(-1, new QSpacerItem(0, 0, QSizePolicy::Minimum, QSizePolicy::Expanding));
 	tabWidget->addTab(channelEnumerator, "General");
 	const int channelMenuTabId = tabWidget->addTab(currentChannelMenuScrollArea, "Channel");
 
-	connect(m_oscPlot, &CapturePlot::channelSelected, [=](int chIdx, bool selected){
+	m_oscChannelSelectedConnection = connect(m_oscPlot, &CapturePlot::channelSelected, [=](int chIdx, bool selected){
 		chIdx -= m_oscAnalogChannels;
 		if (m_oscChannelSelected != chIdx && selected) {
 			m_oscChannelSelected = chIdx;
 			nameLineEdit->setEnabled(true);
 			nameLineEdit->setText(m_oscPlotCurves[chIdx]->getName());
+			traceHeightLineEdit->setEnabled(true);
+			traceHeightLineEdit->setText(QString::number(m_oscPlotCurves[chIdx]->getTraceHeight()));
+
+			if (m_oscChannelSelected < m_nbChannels) {
+				currentChannelTriggerComboBox->setEnabled(true);
+				QComboBox *triggerBox = qobject_cast<QComboBox*>(chEnumeratorLayout->itemAtPosition(m_oscChannelSelected % 8,
+														    m_oscChannelSelected / 8)->layout()->itemAt(1)->widget());
+				currentChannelTriggerComboBox->setCurrentIndex(triggerBox->currentIndex());
+			} else {
+				currentChannelTriggerComboBox->setDisabled(true);
+				QSignalBlocker sb(currentChannelTriggerComboBox);
+				currentChannelTriggerComboBox->setCurrentIndex(0);
+			}
 
 			tabWidget->setCurrentIndex(channelMenuTabId);
 
@@ -680,6 +805,10 @@ std::vector<QWidget *> LogicAnalyzer::enableMixedSignalView(CapturePlot *osc, in
 			m_oscChannelSelected = -1;
 			nameLineEdit->setDisabled(true);
 			nameLineEdit->setText("No channel selected!");
+			traceHeightLineEdit->setDisabled(true);
+			traceHeightLineEdit->setText("");
+			currentChannelTriggerComboBox->setDisabled(true);
+			currentChannelTriggerComboBox->setCurrentIndex(0);
 
 			if (m_oscDecoderMenu) {
 				decoderSettingsLayout->removeWidget(m_oscDecoderMenu);
@@ -689,6 +818,32 @@ std::vector<QWidget *> LogicAnalyzer::enableMixedSignalView(CapturePlot *osc, in
 		}
 
 		updateButtonStackedDecoder();
+	});
+
+	connect(traceHeightLineEdit, &QLineEdit::editingFinished, [=](){
+		int value = traceHeightLineEdit->text().toInt();
+		m_oscPlotCurves[m_oscChannelSelected]->setTraceHeight(value);
+		m_oscPlot->replot();
+		m_oscPlot->positionInGroupChanged(m_oscChannelSelected, 0, 0);
+	});
+
+	connect(currentChannelTriggerComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), [=](int index) {
+		if (m_oscChannelSelected != -1 && m_oscChannelSelected < m_nbChannels) {
+			QComboBox *triggerBox = qobject_cast<QComboBox*>(chEnumeratorLayout->itemAtPosition(m_oscChannelSelected % 8,
+													    m_oscChannelSelected / 8)->layout()->itemAt(1)->widget());
+			triggerBox->setCurrentIndex(index);
+		}
+	});
+
+	connect(tabWidget, &QTabWidget::currentChanged, [=](int index){
+		if (index == tabWidget->indexOf(currentChannelMenuScrollArea)) {
+			if (m_oscChannelSelected != -1 && m_oscChannelSelected < m_nbChannels) {
+				currentChannelTriggerComboBox->setEnabled(true);
+				QComboBox *triggerBox = qobject_cast<QComboBox*>(chEnumeratorLayout->itemAtPosition(m_oscChannelSelected % 8,
+														    m_oscChannelSelected / 8)->layout()->itemAt(1)->widget());
+				currentChannelTriggerComboBox->setCurrentIndex(triggerBox->currentIndex());
+			}
+		}
 	});
 
 	connect(stackDecoderComboBox, &QComboBox::currentTextChanged, [=](const QString &text) {
@@ -735,11 +890,12 @@ std::vector<QWidget *> LogicAnalyzer::enableMixedSignalView(CapturePlot *osc, in
 	});
 
 	currentChannelMenuScrollArea->setWidget(currentChannelMenu);
+	generalScrollArea->setWidget(channelEnumerator);
 
-	tabWidget->addTab(channelEnumerator, "General");
+	tabWidget->addTab(generalScrollArea, "General");
 	tabWidget->addTab(currentChannelMenuScrollArea, "Channel");
 
-	return {tabWidget};
+	return {tabWidget, generalScrollArea};
 }
 
 void LogicAnalyzer::disableMixedSignalView()
@@ -758,6 +914,10 @@ void LogicAnalyzer::disableMixedSignalView()
 
 		curve = m_oscPlot->getDigitalPlotCurve(0);
 	}
+	m_oscPlotCurves.clear();
+	m_oscChannelSelected = -1;
+
+	disconnect(m_oscChannelSelectedConnection);
 
 	m_oscPlot = nullptr;
 }
@@ -855,6 +1015,11 @@ void LogicAnalyzer::onTimeTriggerValueChanged(double value)
 		return;
 	}
 
+	const bool wasRunning = m_started;
+	if (wasRunning) {
+		startStop(false);
+	}
+
 	m_plot.cancelZoom();
 	m_plot.zoomBaseUpdate();
 
@@ -870,16 +1035,25 @@ void LogicAnalyzer::onTimeTriggerValueChanged(double value)
 	m_m2kDigital->getTrigger()->setDigitalDelay(value);
 
 	updateBufferPreviewer(0, m_lastCapturedSample);
+
+	if (wasRunning) {
+		startStop(true);
+	}
 }
 
 void LogicAnalyzer::onSampleRateValueChanged(double value)
 {
+	const bool wasRunning = m_started;
+	if (wasRunning) {
+		startStop(false);
+	}
+
 	qDebug() << "Sample rate: " << value;
 	m_sampleRate = value;
 
 	if (ui->btnStreamOneShot->isChecked()) { // oneshot
 		m_plot.cancelZoom();
-		m_timePositionButton->setValue(m_timeTriggerOffset);
+//		m_timePositionButton->setValue(m_timeTriggerOffset * m_sampleRate);
 		m_plot.setHorizOffset(1.0 / m_sampleRate * m_bufferSize / 2.0 + m_timeTriggerOffset);
 		m_horizOffset = 1.0 / m_sampleRate * m_bufferSize / 2.0 + m_timeTriggerOffset;
 		m_plot.replot();
@@ -905,15 +1079,24 @@ void LogicAnalyzer::onSampleRateValueChanged(double value)
 	double maxT = (1 << 13) * (1.0 / m_sampleRate) - 1.0 / m_sampleRate * m_bufferSize / 2.0; // 8192 * time between samples
 	double minT = -((1 << 13) - 1) * (1.0 / m_sampleRate) - 1.0 / m_sampleRate * m_bufferSize / 2.0; // (2 << 13) - 1 max hdl fifo depth
 	m_plot.setTimeTriggerInterval(minT, maxT);
+
+	if (wasRunning) {
+		startStop(true);
+	}
 }
 
 void LogicAnalyzer::onBufferSizeChanged(double value)
 {
+	const bool wasRunning = m_started;
+	if (wasRunning) {
+		startStop(false);
+	}
+
 	m_bufferSize = value;
 
 	if (ui->btnStreamOneShot->isChecked()) { // oneshot
 		m_plot.cancelZoom();
-		m_timePositionButton->setValue(m_timeTriggerOffset);
+//		m_timePositionButton->setValue(m_timeTriggerOffset);
 		m_plot.setHorizOffset(1.0 / m_sampleRate * m_bufferSize / 2.0 + m_timeTriggerOffset);
 		m_horizOffset = 1.0 / m_sampleRate * m_bufferSize / 2.0 + m_timeTriggerOffset;
 		m_plot.replot();
@@ -938,22 +1121,29 @@ void LogicAnalyzer::onBufferSizeChanged(double value)
 	double maxT = (1 << 13) * (1.0 / m_sampleRate) - 1.0 / m_sampleRate * m_bufferSize / 2.0; // 8192 * time between samples
 	double minT = -((1 << 13) - 1) * (1.0 / m_sampleRate) - 1.0 / m_sampleRate * m_bufferSize / 2.0; // (2 << 13) - 1 max hdl fifo depth
 	m_plot.setTimeTriggerInterval(minT, maxT);
+
+	if (wasRunning) {
+		startStop(true);
+	}
 }
 
 void LogicAnalyzer::on_btnStreamOneShot_toggled(bool toggled)
 {
-	qDebug() << "Btn stream one shot toggled !!!!!: " << toggled;
+	const bool wasRunning = m_started;
+	if (wasRunning) {
+		startStop(false);
+	}
 
 	m_plot.enableTimeTrigger(toggled);
-	m_timePositionButton->setVisible(toggled);
+	m_timePositionButton->setEnabled(toggled);
 
 	m_m2kDigital->getTrigger()->setDigitalStreamingFlag(toggled);
 
 	if (toggled) { // oneshot
 		m_plot.cancelZoom();
-		m_timePositionButton->setValue(m_timeTriggerOffset);
-		m_plot.setHorizOffset(1.0 / m_sampleRate * m_bufferSize / 2.0 - m_timeTriggerOffset);
-		m_horizOffset = 1.0 / m_sampleRate * m_bufferSize / 2.0 - m_timeTriggerOffset;
+		m_timePositionButton->setValue(m_timeTriggerOffset * m_sampleRate);
+		m_plot.setHorizOffset(1.0 / m_sampleRate * m_bufferSize / 2.0 + m_timeTriggerOffset);
+		m_horizOffset = 1.0 / m_sampleRate * m_bufferSize / 2.0 + m_timeTriggerOffset;
 		m_plot.replot();
 		m_plot.zoomBaseUpdate();
 	} else { // streaming
@@ -968,6 +1158,10 @@ void LogicAnalyzer::on_btnStreamOneShot_toggled(bool toggled)
 	m_bufferSizeButton->setMaxValue(toggled ? MAX_BUFFER_SIZE_ONESHOT
 						: MAX_BUFFER_SIZE_STREAM);
 	m_bufferPreviewer->setCursorVisible(toggled);
+
+	if (wasRunning) {
+		startStop(true);
+	}
 }
 
 void LogicAnalyzer::on_btnGroupChannels_toggled(bool checked)
@@ -998,6 +1192,13 @@ void LogicAnalyzer::channelSelectedChanged(int chIdx, bool selected)
 		qDebug() << "Selected channel: " << chIdx;
 
 		m_selectedChannel = chIdx;
+
+		if (m_selectedChannel < m_nbChannels) {
+			ui->hardwareName->setText("DIO " + QString::number(m_selectedChannel));
+		} else {
+			ui->hardwareName->setText("");
+		}
+
 		ui->nameLineEdit->setEnabled(true);
 		ui->nameLineEdit->setText(m_plotCurves[m_selectedChannel]->getName());
 		ui->traceHeightLineEdit->setEnabled(true);
@@ -1040,6 +1241,7 @@ void LogicAnalyzer::channelSelectedChanged(int chIdx, bool selected)
 		}
 	} else if (m_selectedChannel == chIdx && !selected) {
 		m_selectedChannel = -1;
+		ui->hardwareName->setText("");
 		ui->nameLineEdit->setDisabled(true);
 		ui->nameLineEdit->setText("");
 		ui->traceHeightLineEdit->setDisabled(true);
@@ -1065,7 +1267,7 @@ void LogicAnalyzer::setupUi()
 	ui->setupUi(this);
 
 	// Hide the run button
-	ui->runSingleWidget->enableRunButton(false);
+//	ui->runSingleWidget->enableRunButton(false);
 
 	int gsettings_panel = ui->stackedWidget->indexOf(ui->generalSettings);
 	ui->btnGeneralSettings->setProperty("id", QVariant(-gsettings_panel));
@@ -1126,8 +1328,6 @@ void LogicAnalyzer::setupUi()
 	m_bufferPreviewer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
 	ui->vLayoutBufferSlot->addWidget(m_bufferPreviewer);
-
-	m_plot.canvas()->setStyleSheet("background-color: #272730");
 
 
 	// Setup sweep settings menu
@@ -1272,18 +1472,6 @@ void LogicAnalyzer::connectSignalsAndSlots()
 	connect(ui->nameLineEdit, &QLineEdit::textChanged, [=](const QString &text){
 		m_plot.setChannelName(text, m_selectedChannel);
 		m_plotCurves[m_selectedChannel]->setName(text);
-		if (m_selectedChannel < m_nbChannels) {
-			QLayout *widgetInLayout = ui->channelEnumeratorLayout->itemAtPosition(m_selectedChannel % 8,
-								    m_selectedChannel / 8)->layout();
-			auto channelBox = dynamic_cast<QCheckBox *>(widgetInLayout->itemAt(0)->widget());
-			channelBox->setText(text);
-		} else {
-			const int selectedDecoder = m_selectedChannel - m_nbChannels;
-			QLayout *widgetInLayout = ui->decoderEnumeratorLayout->itemAtPosition(selectedDecoder / 2,
-								    selectedDecoder % 2)->widget()->layout();
-			auto decoderBox = dynamic_cast<QCheckBox *>(widgetInLayout->itemAt(0)->widget());
-			decoderBox->setText(text);
-		}
 	});
 
 	connect(ui->traceHeightLineEdit, &QLineEdit::textChanged, [=](const QString &text){
@@ -1427,10 +1615,10 @@ void LogicAnalyzer::updateBufferPreviewer(int64_t min, int64_t max)
 	long long totalSamples = m_bufferSize;
 
 	if (totalSamples > 0) {
-		const int offset = ui->btnStreamOneShot->isChecked() ? m_timePositionButton->value() * (1.0 / m_sampleRate)
+		const int offset = ui->btnStreamOneShot->isChecked() ? m_timePositionButton->value()
 								     : 0;
-		dataInterval.setMinValue(-((min / m_sampleRate) + offset));
-		dataInterval.setMaxValue((max / m_sampleRate) - offset);
+		dataInterval.setMinValue(offset / m_sampleRate);
+		dataInterval.setMaxValue((offset + max) / m_sampleRate);
 	}
 
 	// Use the two intervals to determine the width and position of the
@@ -1487,11 +1675,11 @@ void LogicAnalyzer::initBufferScrolling()
 	});
 	connect(m_bufferPreviewer, &BufferPreviewer::bufferResetPosition, [=](){
 		m_plot.setHorizOffset(1.0 / m_sampleRate * m_bufferSize / 2.0 +
-				      (ui->btnStreamOneShot ? 0 : m_timeTriggerOffset));
+				      (ui->btnStreamOneShot ? 0 : m_timeTriggerOffset / m_sampleRate));
 		m_plot.replot();
 		updateBufferPreviewer(0, m_lastCapturedSample);
 		m_horizOffset = 1.0 / m_sampleRate * m_bufferSize / 2.0 +
-				(ui->btnStreamOneShot ? 0 : m_timeTriggerOffset);
+				(ui->btnStreamOneShot ? 0 : m_timeTriggerOffset / m_sampleRate);
 	});
 }
 
@@ -1503,6 +1691,7 @@ void LogicAnalyzer::startStop(bool start)
 
 	m_started = start;
 
+	m_triggerUpdater->setEnabled(start);
 	if (start) {
 		if (m_captureThread) {
 			m_stopRequested = true;
@@ -1510,6 +1699,10 @@ void LogicAnalyzer::startStop(bool start)
 			delete m_captureThread;
 			m_captureThread = nullptr;
 		}
+
+		m_plot.setSampleRatelabelValue(m_sampleRate);
+		m_plot.setBufferSizeLabelValue(m_bufferSize);
+		m_plot.setTimeBaseLabelValue(m_bufferSize / m_sampleRate / m_plot.xAxisNumDiv());
 
 		m_stopRequested = false;
 
@@ -1527,7 +1720,7 @@ void LogicAnalyzer::startStop(bool start)
 		const double delay = oneShotOrStream ? m_timeTriggerOffset * m_sampleRate
 					       : 0;
 
-		const double setSampleRate = m_m2kDigital->setSampleRateIn((sampleRate+1));
+		const double setSampleRate = m_m2kDigital->setSampleRateIn((sampleRate + 1));
 		m_sampleRateButton->setValue(setSampleRate);
 
 		m_m2kDigital->getTrigger()->setDigitalStreamingFlag(!oneShotOrStream);
@@ -1544,26 +1737,6 @@ void LogicAnalyzer::startStop(bool start)
 
 		m_lastCapturedSample = 0;
 
-		if (m_autoMode) {
-
-			m_plot.setTriggerState(CapturePlot::Auto);
-
-			double oneBufferTimeOut = m_timerTimeout;
-
-			if (!oneShotOrStream) {
-				uint64_t chunks = 4;
-				while ((bufferSizeAdjusted >> chunks) > (1 << 19)) {
-					chunks++; // select a small size for the chunks
-					// example: 2^19 samples in each chunk
-				}
-				const uint64_t chunk_size = (bufferSizeAdjusted >> chunks) > 0 ? (bufferSizeAdjusted >> chunks) : 4 ;
-				const uint64_t buffersCount = bufferSizeAdjusted / chunk_size;
-				oneBufferTimeOut /= buffersCount;
-			}
-
-			m_timer->start(oneBufferTimeOut);
-		}
-
 		m_captureThread = new std::thread([=](){
 
 			if (m_buffer) {
@@ -1571,94 +1744,200 @@ void LogicAnalyzer::startStop(bool start)
 				m_buffer = nullptr;
 			}
 
-			m_buffer = new uint16_t[bufferSize];
+			m_buffer = new uint16_t[bufferSizeAdjusted];
 			QMetaObject::invokeMethod(this, [=](){
 				m_exportSettings->enableExportButton(true);
 			}, Qt::DirectConnection);
 
-			QMetaObject::invokeMethod(this, [=](){
-				m_plot.setTriggerState(CapturePlot::Waiting);
-			}, Qt::QueuedConnection);
+			uint64_t totalSamples = bufferSizeAdjusted;
+			uint64_t chunk_size = 0;
 
-			if (ui->btnStreamOneShot->isChecked()) {
-				try {
-					const uint16_t * const temp = m_m2kDigital->getSamplesP(bufferSize);
-					memcpy(m_buffer, temp, bufferSizeAdjusted * sizeof(uint16_t));
+			double oneBufferTimeout = m_timerTimeout;
 
-					QMetaObject::invokeMethod(this, [=](){
-						m_plot.setTriggerState(CapturePlot::Triggered);
-					}, Qt::QueuedConnection);
+			// clear any warning
+			m_plot.setMaxBufferSizeErrorLabel(false);
 
-					m_lastCapturedSample = bufferSize;
-					Q_EMIT dataAvailable(0, bufferSize);
-					updateBufferPreviewer(0, m_lastCapturedSample);
+			if (oneShotOrStream) { // oneshot
+				do {
+					try {
+						m_m2kDigital->setKernelBuffersCountIn(1);
+						break;
+					} catch (libm2k::m2k_exception &e) {
+						qDebug() << e.what();
+					}
+				} while (true);
 
-				} catch (libm2k::m2k_exception &e) {
-					HANDLE_EXCEPTION(e)
-					qDebug() << e.what();
+				chunk_size = bufferSizeAdjusted;
+
+			} else { // streaming
+				const int minKernelBuffers = 4;
+				const int oneBufferMaxSize = 2 * 1024 * 1024; // 2M
+
+				m_currentKernelBuffers = minKernelBuffers;
+
+				/* ensure we have the minimum amount of kernel buffers to fit the buffer
+				 * ex: we want to capture a 40M buffer, we will use (at least) 10 kernel buffers
+				 * */
+				while (bufferSizeAdjusted > (m_currentKernelBuffers * oneBufferMaxSize)
+						&& m_currentKernelBuffers < MAX_KERNEL_BUFFERS) {
+					m_currentKernelBuffers++;
 				}
-			} else {
-				uint64_t chunks = 4;
-				while ((bufferSizeAdjusted >> chunks) > (1 << 19)) {
-					chunks++; // select a small size for the chunks
-					// example: 2^19 samples in each chunk
+
+				/* ensure we don't spend more than 100ms on a acquiring a buffer if we can
+				 * further divide it into smaller buffers (kernel buffers still available)
+				 * */
+				const double maxCaptureDuration = 0.1; // 100ms
+				while (((static_cast<double>(bufferSizeAdjusted) / setSampleRate)
+						/ static_cast<double>(m_currentKernelBuffers)) > maxCaptureDuration
+						&& m_currentKernelBuffers < MAX_KERNEL_BUFFERS) {
+					m_currentKernelBuffers++;
 				}
-				const uint64_t chunk_size = (bufferSizeAdjusted >> chunks) > 0 ? (bufferSizeAdjusted >> chunks) : 4 ;
-				uint64_t totalSamples = bufferSizeAdjusted;
-				m_m2kDigital->setKernelBuffersCountIn(64);
-				uint64_t absIndex = 0;
+
+				// buffer size per kernel buffer
+				chunk_size = bufferSizeAdjusted / m_currentKernelBuffers;
+
+				uint64_t chunkSizeBeforeAdjust = chunk_size;
+
+				// buffer size must be divisible by 4
+				chunk_size = 4 * (chunk_size / 4);
+
+				/* If the chunk_size was not disible by 4 in the first place we would get a smaller
+				 * value for it. Let's check if we can increase the chunk_size to the next divisible by 4
+				 * number otherwise we need to add another kernel buffer if this is possible
+				 * */
+				if (chunk_size + 4 <= oneBufferMaxSize && chunkSizeBeforeAdjust != chunk_size) {
+					chunk_size += 4;
+				}
+
+				// If the buffer size is > 64 * 4M we need to cap the chunk_size to 4M
+				if (chunk_size > oneBufferMaxSize) {
+					chunk_size = oneBufferMaxSize;
+				}
+
+				if (bufferSizeAdjusted >= MAX_KERNEL_BUFFERS * oneBufferMaxSize) {
+					/* in this case if the sample rate is greater than 5M samples / s
+					 * warn that data might not be continuos
+					 * */
+					if (setSampleRate > MAX_SR_STREAM) {
+						m_plot.setMaxBufferSizeErrorLabel(true, "Data might not be continuous, lower sample rate or buffer size");
+					}
+				}
 
 				do {
-					const uint64_t captureSize = std::min(chunk_size, totalSamples);
 					try {
-						const uint16_t * const temp = m_m2kDigital->getSamplesP(captureSize);
-						memcpy(m_buffer + absIndex, temp, sizeof(uint16_t) * captureSize);
-						absIndex += captureSize;
-						totalSamples -= captureSize;
-
-						QMetaObject::invokeMethod(this, [=](){
-							m_plot.setTriggerState(CapturePlot::Triggered);
-						}, Qt::QueuedConnection);
-
+						m_m2kDigital->setKernelBuffersCountIn(m_currentKernelBuffers);
+						break;
 					} catch (libm2k::m2k_exception &e) {
-						HANDLE_EXCEPTION(e)
 						qDebug() << e.what();
-						break;
 					}
+				} while (true);
 
-					if (m_stopRequested) {
-						break;
-					}
-
-					Q_EMIT dataAvailable(absIndex - captureSize, absIndex);
-
-					QMetaObject::invokeMethod(&m_plot, // trigger replot on Main Thread
-								  "replot",
-								  Qt::QueuedConnection);
-					m_lastCapturedSample = absIndex;
-					updateBufferPreviewer(0, m_lastCapturedSample);
-
-				} while (totalSamples);
+				// time for one kernel buffer + 100ms for the transfer
+				oneBufferTimeout = ((oneBufferTimeout - 100) / m_currentKernelBuffers) + 100;
 			}
+
+			uint64_t absIndex = 0;
+
+			// notify that the acquisition started one waiting for it
+			// to start, in order to correctly stop it
+			{
+				std::unique_lock<std::mutex> lock(m_acquisitionStartedMutex);
+				m_m2kDigital->startAcquisition(chunk_size);
+				m_acquisitionStarted = true;
+			}
+			m_acquisitionStartedCv.notify_one();
+
+			do {
+				const uint64_t captureSize = std::min(chunk_size, totalSamples);
+
+				try {
+					if (m_autoMode) {
+						QMetaObject::invokeMethod(this, [=](){
+							m_timer->start(oneBufferTimeout);
+						});
+					}
+
+					const uint16_t * const temp = m_m2kDigital->getSamplesP(chunk_size);
+					memcpy(m_buffer + absIndex, temp, sizeof(uint16_t) * captureSize);
+
+					absIndex += captureSize;
+					totalSamples -= captureSize;
+
+					if (m_autoMode) {
+						QMetaObject::invokeMethod(this, [=](){
+							m_timer->stop();
+						});
+					}
+
+					if (m_triggerState.empty()) {
+						QMetaObject::invokeMethod(this, [=](){
+							m_triggerUpdater->setInput(CapturePlot::Triggered);
+						}, Qt::QueuedConnection);
+					} else {
+						QMetaObject::invokeMethod(this, [=](){
+							m_triggerUpdater->setInput(CapturePlot::Auto);
+						}, Qt::QueuedConnection);
+					}
+
+				} catch (libm2k::m2k_exception &e) {
+//					HANDLE_EXCEPTION(e)
+					qDebug() << e.what() << " code: " << e.iioCode();
+					break;
+				}
+
+				if (m_stopRequested) {
+					break;
+				}
+
+				Q_EMIT dataAvailable(absIndex - captureSize, absIndex);
+
+				QMetaObject::invokeMethod(&m_plot, // trigger replot on Main Thread
+							  "replot",
+							  Qt::QueuedConnection);
+				m_lastCapturedSample = absIndex;
+				updateBufferPreviewer(0, m_lastCapturedSample);
+
+				QMetaObject::invokeMethod(this,
+							  "restoreTriggerState",
+							  Qt::QueuedConnection);
+
+				if (!totalSamples && ui->runSingleWidget->runButtonChecked()) {
+					m_m2kDigital->stopAcquisition();
+					{
+						std::unique_lock<std::mutex> lock(m_acquisitionStartedMutex);
+						m_acquisitionStarted = false;
+					}
+					m_m2kDigital->getTrigger()->setDigitalStreamingFlag(!oneShotOrStream);
+
+					// notify that the acquisition started one waiting for it
+					// to start, in order to correctly stop it
+					{
+						std::unique_lock<std::mutex> lock(m_acquisitionStartedMutex);
+						m_m2kDigital->startAcquisition(chunk_size);
+						m_acquisitionStarted = true;
+					}
+					m_acquisitionStartedCv.notify_one();
+
+					totalSamples = bufferSizeAdjusted;
+					absIndex = 0;
+
+					std::this_thread::sleep_for(std::chrono::milliseconds(100));
+				}
+			} while (totalSamples && !m_stopRequested);
 
 			m_started = false;
 
-			QMetaObject::invokeMethod(this,
-						  "restoreTriggerState",
-						  Qt::DirectConnection);
-
-			//
-			QMetaObject::invokeMethod(ui->runSingleWidget,
-						  "toggle",
-						  Qt::QueuedConnection,
-						  Q_ARG(bool, false));
+			if (ui->runSingleWidget->singleButtonChecked()) {
+				QMetaObject::invokeMethod(ui->runSingleWidget,
+							  "toggle",
+							  Qt::QueuedConnection,
+							  Q_ARG(bool, false));
+				m_triggerUpdater->setEnabled(false);
+			}
+			m_m2kDigital->stopAcquisition();
 
 			QMetaObject::invokeMethod(&m_plot,
 						  "replot");
-
-			QMetaObject::invokeMethod(this, [=](){
-				m_plot.setTriggerState(CapturePlot::Stop);
-			}, Qt::QueuedConnection);
 
 			QMetaObject::invokeMethod(this, [=](){
 				m_exportSettings->enableExportButton(true);
@@ -1668,6 +1947,14 @@ void LogicAnalyzer::startStop(bool start)
 
 	} else {
 		if (m_captureThread) {
+			// a stop request might be triggered before getting to getSamplesP,
+			// thus cancelAcquisition in this case will be a no-op. In order to avoid
+			// this issue we wait for acquisition to be started
+			{
+				std::unique_lock<std::mutex> lock(m_acquisitionStartedMutex);
+				m_acquisitionStartedCv.wait(lock, [=]{ return m_acquisitionStarted; });
+			}
+
 			m_stopRequested = true;
 			try {
 				m_m2kDigital->cancelAcquisition(); // cancelBufferIn
@@ -1676,15 +1963,13 @@ void LogicAnalyzer::startStop(bool start)
 			}
 
 			m_captureThread->join();
+			m_acquisitionStarted = false;
+
 			delete m_captureThread;
 			m_captureThread = nullptr;
 			restoreTriggerState();
 		}
-
-		m_plot.setTriggerState(CapturePlot::Stop);
-
 	}
-
 }
 
 void LogicAnalyzer::setupDecoders()
@@ -1980,26 +2265,30 @@ void LogicAnalyzer::setupTriggerMenu()
 {
 	connect(ui->btnTriggerMode, &CustomSwitch::toggled, [=](bool toggled){
 		m_autoMode = toggled;
-
 		if (m_autoMode && m_started) {
 
 			double oneBufferTimeOut = m_timerTimeout;
 
 			if (!ui->btnStreamOneShot->isChecked()) {
-				uint64_t chunks = 4;
-				while ((m_bufferSize >> chunks) > (1 << 19)) {
-					chunks++; // select a small size for the chunks
-					// example: 2^19 samples in each chunk
-				}
-				const uint64_t chunk_size = (m_bufferSize >> chunks) > 0 ? (m_bufferSize >> chunks) : 4 ;
-				const uint64_t buffersCount = m_bufferSize / chunk_size;
-				oneBufferTimeOut /= buffersCount;
+				oneBufferTimeOut /= m_currentKernelBuffers;
 			}
 
 			m_timer->start(oneBufferTimeOut);
 
 			qDebug() << "auto mode: " << m_autoMode << " with timeout: "
 				 << oneBufferTimeOut << " when logic is started: " << m_started;
+		}
+
+		if (toggled) {
+			m_triggerUpdater->setIdleState(CapturePlot::Auto);
+			m_triggerUpdater->setInput(CapturePlot::Auto);
+		} else {
+			m_triggerUpdater->setIdleState(CapturePlot::Waiting);
+			m_triggerUpdater->setInput(CapturePlot::Waiting);
+		}
+
+		if (!m_autoMode) {
+			m_timer->stop();
 		}
 	});
 
@@ -2064,18 +2353,19 @@ void LogicAnalyzer::setupTriggerMenu()
 		ui->lblWarningFw->setVisible(true);
 	}
 
-	m_timer->setSingleShot(true);
 	connect(m_timer, &QTimer::timeout,
 		this, &LogicAnalyzer::saveTriggerState);
-
-	m_plot.setTriggerState(CapturePlot::Stop);
-
 }
 
 void LogicAnalyzer::saveTriggerState()
 {
 	// save trigger state and set to no trigger each channel
-	if (m_started) {
+	if (m_started && !m_triggerState.size()) {
+		const bool streaming = !ui->btnStreamOneShot->isChecked();
+		if (streaming) {
+			m_m2kDigital->getTrigger()->setDigitalStreamingFlag(false);
+		}
+
 		for (int i = 0; i < m_nbChannels; ++i) {
 			m_triggerState.push_back(m_m2kDigital->getTrigger()->getDigitalCondition(i));
 			m_m2kDigital->getTrigger()->setDigitalCondition(i, M2K_TRIGGER_CONDITION_DIGITAL::NO_TRIGGER_DIGITAL);
@@ -2084,19 +2374,32 @@ void LogicAnalyzer::saveTriggerState()
 		auto externalTriggerCondition = m_m2kDigital->getTrigger()->getDigitalExternalCondition();
 		m_triggerState.push_back(externalTriggerCondition);
 		m_m2kDigital->getTrigger()->setDigitalExternalCondition(M2K_TRIGGER_CONDITION_DIGITAL::NO_TRIGGER_DIGITAL);
+
+		if (streaming) {
+			m_m2kDigital->getTrigger()->setDigitalStreamingFlag(true);
+		}
 	}
 }
 
 void LogicAnalyzer::restoreTriggerState()
 {
 	// restored saved trigger state
-	if (!m_started && m_triggerState.size()) {
+	if (m_triggerState.size()) {
+		const bool streaming = !ui->btnStreamOneShot->isChecked();
+		if (streaming) {
+			m_m2kDigital->getTrigger()->setDigitalStreamingFlag(false);
+		}
+
 		for (int i = 0; i < m_nbChannels; ++i) {
 			m_triggerState.push_back(m_m2kDigital->getTrigger()->getDigitalCondition(i));
 			m_m2kDigital->getTrigger()->setDigitalCondition(i, m_triggerState[i]);
 		}
 
 		m_m2kDigital->getTrigger()->setDigitalExternalCondition(m_triggerState.back());
+
+		if (streaming) {
+			m_m2kDigital->getTrigger()->setDigitalStreamingFlag(true);
+		}
 
 		m_triggerState.clear();
 	}

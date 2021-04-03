@@ -392,7 +392,7 @@ Oscilloscope::Oscilloscope(struct iio_context *ctx, Filter *filt,
 	for (uint i = 0; i < nb_channels; i++)
 		xy_plot.setYaxisMouseGesturesEnabled(i, false);
 
-	xy_plot.setLineColor(0, QColor("#F8E71C"));
+	xy_plot.setLineColor(0, QColor("#4a64ff"));
 
 	ui->hlayout_fft->addWidget(&fft_plot);
 	ui->container_fft_plot->hide();
@@ -827,11 +827,12 @@ Oscilloscope::Oscilloscope(struct iio_context *ctx, Filter *filt,
 
 	connect(this, &Tool::detachedState,
 		this, &Oscilloscope::toolDetached);
-	min_detached_width = this->minimumWidth();
 	toolDetached(false);
 
 	connect(&plot,SIGNAL(leftGateChanged(double)),SLOT(onLeftGateChanged(double)));
 	connect(&plot,SIGNAL(rightGateChanged(double)),SLOT(onRightGateChanged(double)));
+
+	ui->btnHelp->setUrl("https://wiki.analog.com/university/tools/m2k/scopy/oscilloscope");
 
 }
 
@@ -1285,11 +1286,16 @@ void Oscilloscope::setFilteringEnabled(bool set)
 	setSampleRate(active_sample_rate);
 }
 
-void Oscilloscope::enableMixedSignalView()
+void Oscilloscope::enableMixedSignalView(ChannelWidget *cw)
 {
 	const bool iioStarted = isIioManagerStarted();
 	if (iioStarted) {
 		iio->lock();
+	}
+
+	const bool hasLabels = plot.labelsEnabled();
+	if (hasLabels) {
+		enableLabels(false);
 	}
 
 	m_mixedSignalViewEnabled = true;
@@ -1298,6 +1304,13 @@ void Oscilloscope::enableMixedSignalView()
 								       nb_math_channels + nb_ref_channels);
 
 	ui->logicSettingsLayout->addWidget(m_mixedSignalViewMenu[0]);
+
+	QTabWidget *tb = qobject_cast<QTabWidget *>(m_mixedSignalViewMenu[0]);
+	showLogicAnalyzerTriggerConnection = connect(&trigger_settings, &TriggerSettings::showLogicAnalyzerTriggerSettings,
+						     this, [=](){
+		cw->menuButton()->setChecked(true);
+		tb->setCurrentIndex(tb->indexOf(m_mixedSignalViewMenu[1]));
+	});
 
 	mixed_sink = mixed_signal_sink::make(m_logicAnalyzer, &this->plot, active_sample_count);
 
@@ -1327,6 +1340,10 @@ void Oscilloscope::enableMixedSignalView()
 
 	onHorizScaleValueChanged(timeBase->value());
 	onTimePositionChanged(timePosition->value());
+
+	if (hasLabels) {
+		enableLabels(true);
+	}
 }
 
 void Oscilloscope::disableMixedSignalView()
@@ -1338,6 +1355,8 @@ void Oscilloscope::disableMixedSignalView()
 	}
 
 	m_mixedSignalViewEnabled = false;
+
+	disconnect(showLogicAnalyzerTriggerConnection);
 
 	// disable mixed signal from logic
 	ui->logicSettingsLayout->removeWidget(m_mixedSignalViewMenu[0]);
@@ -1858,7 +1877,7 @@ void Oscilloscope::toggleCursorsMode(bool toggled)
 void Oscilloscope::toolDetached(bool detached)
 {
 	if (detached) {
-		this->setMinimumWidth(min_detached_width);
+		this->setMinimumSize(910, 490);
 		this->setSizePolicy(QSizePolicy::Preferred,
 				    QSizePolicy::Preferred);
 	} else {
@@ -1978,7 +1997,6 @@ void Oscilloscope::create_add_channel_panel()
 	sizePolicy.setVerticalStretch(0);
 	sizePolicy.setHeightForWidth(labelWarningMixedSignal->sizePolicy().hasHeightForWidth());
 	labelWarningMixedSignal->setSizePolicy(sizePolicy);
-	labelWarningMixedSignal->setStyleSheet(QString::fromUtf8("color: white;"));
 	labelWarningMixedSignal->setWordWrap(true);
 	labelWarningMixedSignal->setVisible(false);
 
@@ -1987,12 +2005,10 @@ void Oscilloscope::create_add_channel_panel()
 	layout_logic->insertWidget(1, labelWarningMixedSignal);
 
 	QLabel *infoLabel = new QLabel(tr("* When the Mixed Signal View is enabled the LogicAnalyzer tool will be disabled!\n"
-					  "** The trigger can be disabled or set only on the Digital channels or Analog channels, not on both at the same time!"));
-	infoLabel->setStyleSheet(QString::fromUtf8("color: white;"));
+					  "** The trigger can be disabled or set only on the Digital channels or Analog channels, not on both at the same time!"), panel);
+	layout_logic->insertWidget(2, infoLabel);
 	infoLabel->setWordWrap(true);
 	infoLabel->setVisible(true);
-
-	layout_logic->insertWidget(2, infoLabel);
 
 	QPushButton *btn = math_ui.btnAddChannel;
 
@@ -2077,6 +2093,22 @@ void Oscilloscope::create_add_channel_panel()
 
 	tabWidget->addTab(logic, tr("Logic"));
 
+	connect(ui->mixedSignalBtn, &QPushButton::clicked, [=](){
+		if (!m_mixedSignalViewEnabled) {
+			ui->btnAddMath->click();
+			tabWidget->setCurrentIndex(tabWidget->indexOf(logic));
+		} else {
+			for (int i = 0; i < ui->channelsList->count(); ++i) {
+				ChannelWidget *cw = qobject_cast<ChannelWidget *>(
+							ui->channelsList->itemAt(i)->widget());
+				if (cw && cw->fullName() == "Logic Analyzer") {
+					cw->deleteButton()->click();
+					break;
+				}
+			}
+		}
+	});
+
 	connect(btnOpenFile, &QPushButton::clicked, this, &Oscilloscope::import);
 
 	connect(tabWidget, &QTabWidget::currentChanged, [=](int index) {
@@ -2106,6 +2138,7 @@ void Oscilloscope::create_add_channel_panel()
 		if (tabWidget->currentIndex() == 2) {
 
 			qDebug() << "Enable mixed signal view!";
+			ui->mixedSignalBtn->setText("Disable Mixed\nSignal View");
 
 			ChannelWidget *logicAnalyzerChannelWidget = new ChannelWidget(-1, true, false,
 										      QColor(Qt::yellow), this);
@@ -2145,13 +2178,14 @@ void Oscilloscope::create_add_channel_panel()
 				logicAnalyzerChannelWidget->deleteLater();
 
 				tabWidget->setTabEnabled(logicTab, true);
+				ui->mixedSignalBtn->setText("Enable Mixed\nSignal View");
 
 				disableMixedSignalView();
 			});
 
 			logicAnalyzerChannelWidget->menuButton()->setChecked(true);
 
-			enableMixedSignalView();
+			enableMixedSignalView(logicAnalyzerChannelWidget);
 
 			return;
 		}
@@ -4314,11 +4348,11 @@ void Oscilloscope::measure_panel_init()
 	cursor_readouts_ui->setupUi(cursorReadouts);
 
 	cursor_readouts_ui->TimeCursors->setStyleSheet("QWidget {"
-		"background-color: transparent;"
-		"color: white;}");
+		"background-color: transparent;}"
+						       );
 	cursor_readouts_ui->VoltageCursors->setStyleSheet("QWidget {"
-		"background-color: transparent;"
-		"color: white;}");
+		"background-color: transparent;}"
+							  );
 
 	// Avoid labels jumping around to left or right by imposing a min width
 	QLabel *label = new QLabel(this);

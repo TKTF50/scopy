@@ -118,6 +118,11 @@ PatternGenerator::PatternGenerator(struct iio_context *ctx, Filter *filt,
 			m_plot.replot();
 
 			checkEnabledChannels();
+
+			if (m_isRunning) {
+				startStop(false);
+				startStop(true);
+			}
 		});
 		channelBox->setChecked(false);
 	}
@@ -144,6 +149,8 @@ PatternGenerator::PatternGenerator(struct iio_context *ctx, Filter *filt,
 							  TOOL_PATTERN_GENERATOR)));
 	api->load(*settings);
 	api->js_register(engine);
+
+	m_ui->btnHelp->setUrl("https://wiki.analog.com/university/tools/m2k/scopy/pattgen");
 }
 
 void PatternGenerator::readPreferences()
@@ -237,8 +244,6 @@ void PatternGenerator::setupUi()
 	m_ui->gridLayoutPlot->addWidget(m_plot.bottomHandlesArea(), 3, 0, 1, 4);
 	m_ui->gridLayoutPlot->addItem(plotSpacer, 4, 0, 1, 4);
 
-	// TODO: investigate why the plot's canvas background color is weird
-	m_plot.canvas()->setStyleSheet("background-color: #272730");
 
 	m_plot.enableAxis(QwtPlot::yLeft, false);
 	m_plot.enableAxis(QwtPlot::xBottom, false);
@@ -697,8 +702,8 @@ void PatternGenerator::startStop(bool start)
 			lockMask = lockMask | enabled << i;
 			if (enabled) {
 				m_m2kDigital->setDirection(i, DIO_OUTPUT);
-				m_m2kDigital->enableChannel(i, true);
 			}
+			m_m2kDigital->enableChannel(i, enabled);
 		}
 
 		m_diom->setMode(m_outputMode);
@@ -751,9 +756,16 @@ void PatternGenerator::generateBuffer()
 	m_sampleRate = sr;
 
 	const uint64_t bufferSize = computeBufferSize(sr);
+	m_plot.setMaxBufferSizeErrorLabel(bufferSize == MAX_BUFFER_SIZE);
 
 	qDebug() << "Buffer size is: " << bufferSize;
 	m_bufferSize = bufferSize;
+
+	m_plot.setSampleRatelabelValue(m_sampleRate);
+	m_plot.setBufferSizeLabelValue(m_bufferSize);
+	m_plot.setTimeBaseLabelValue(static_cast<double>(m_bufferSize) /
+				     static_cast<double>(m_sampleRate) /
+				     m_plot.xAxisNumDiv());
 
 	if (m_buffer) {
 		delete[] m_buffer;

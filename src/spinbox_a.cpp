@@ -21,6 +21,7 @@
 #include "spinbox_a.hpp"
 #include "completion_circle.h"
 #include "apiobjectmanager.h"
+#include "singletone_wrapper.h"
 
 #include "ui_spinbox_a.h"
 
@@ -55,13 +56,6 @@ SpinBoxA::SpinBoxA(QWidget *parent) : QWidget(parent),
 {
 	ui->setupUi(this);
 	ui->SBA_LineEdit->setValidator(m_validator);
-
-	QFile file(":stylesheets/stylesheets/spinbox_type_a.qss");
-	file.open(QFile::ReadOnly);
-	QString styleSheet = QString::fromLatin1(file.readAll());
-
-	const QString& currentStylesheet = this->styleSheet();
-	this->setStyleSheet(currentStylesheet + styleSheet);
 
 	ui->SBA_LineEdit->installEventFilter(this);
 	ui->SBA_CompletionCircle->installEventFilter(this);
@@ -119,7 +113,7 @@ SpinBoxA::SpinBoxA(vector<pair<QString, double> >units, const QString& name,
 
 	QSettings oldSettings;
 	QFile tempFile(oldSettings.fileName() + ".bak");
-	m_settings = new QSettings(tempFile.fileName(), QSettings::IniFormat);
+	m_settings = SingleToneWrapper<QSettings *>::getInstance().getWrapped();
 
 	m_sba_api->load(*m_settings);
 	m_is_step_down = false;
@@ -130,8 +124,8 @@ SpinBoxA::~SpinBoxA()
 	current_id--;
 
 	m_sba_api->save(*m_settings);
+
 	delete m_sba_api;
-	delete m_settings;
 	delete ui;
 }
 

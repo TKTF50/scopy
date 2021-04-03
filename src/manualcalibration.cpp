@@ -242,7 +242,7 @@ void ManualCalibration::positivePowerSupplyParam(const int step)
 
 		/*adc offset calibration*/
 		try {
-			value = m_m2k_powersupply->readChannel(0);
+			value = m_m2k_powersupply->readChannel(0, false);
 		} catch (libm2k::m2k_exception &e) {
 			HANDLE_EXCEPTION(e)
 			qDebug(CAT_CALIBRATION_MANUAL) << "Can't read value: " << e.what();
@@ -276,7 +276,7 @@ void ManualCalibration::positivePowerSupplyParam(const int step)
 
 			/*adc gain calibration*/
 			try {
-				value = m_m2k_powersupply->readChannel(0);
+				value = m_m2k_powersupply->readChannel(0, false);
 			} catch (libm2k::m2k_exception &e) {
 				HANDLE_EXCEPTION(e)
 				qDebug(CAT_CALIBRATION_MANUAL) << "Can't read value: " << e.what();
@@ -319,7 +319,7 @@ void ManualCalibration::setEnablePositiveSuppply(bool enabled)
 void ManualCalibration::setPositiveValue(double value)
 {
 	try {
-		m_m2k_powersupply->pushChannel(0, value);
+		m_m2k_powersupply->pushChannel(0, value, false);
 	} catch (libm2k::m2k_exception &e) {
 		HANDLE_EXCEPTION(e)
 		qDebug(CAT_CALIBRATION_MANUAL) << "Can't write value: " << e.what();
@@ -363,7 +363,7 @@ void ManualCalibration::negativePowerSupplyParam(const int step)
 
 		/*adc offset calibration*/
 		try {
-			value = m_m2k_powersupply->readChannel(1);
+			value = m_m2k_powersupply->readChannel(1, false);
 		} catch (libm2k::m2k_exception &e) {
 			HANDLE_EXCEPTION(e)
 			qDebug(CAT_CALIBRATION_MANUAL) << "Can't read value: " << e.what();
@@ -396,7 +396,7 @@ void ManualCalibration::negativePowerSupplyParam(const int step)
 
 			/*adc gain calibration*/
 			try {
-				value = m_m2k_powersupply->readChannel(1);
+				value = m_m2k_powersupply->readChannel(1, false);
 			} catch (libm2k::m2k_exception &e) {
 				HANDLE_EXCEPTION(e)
 				qDebug(CAT_CALIBRATION_MANUAL) << "Can't read value: " << e.what();
@@ -438,7 +438,7 @@ void ManualCalibration::setEnableNegativeSuppply(bool enabled)
 void ManualCalibration::setNegativeValue(double value)
 {
 	try {
-		m_m2k_powersupply->pushChannel(1, value);
+		m_m2k_powersupply->pushChannel(1, value, false);
 	} catch (libm2k::m2k_exception &e) {
 		HANDLE_EXCEPTION(e)
 		qDebug(CAT_CALIBRATION_MANUAL) << "Can't write value: " << e.what();
@@ -548,10 +548,12 @@ void ManualCalibration::on_loadButton_clicked()
 void ManualCalibration::on_saveButton_clicked()
 {
 	QString fileName;
+	QString selectedFilter;
+
 	if (calibrationFilePath == "") {
-		fileName = QFileDialog::getOpenFileName(this, tr("Save File"),
-								   "/home",
-								   tr("ini (*.ini)"));
+		fileName = QFileDialog::getSaveFileName(this,
+		    tr("Save file"), "", tr("Ini files (*.ini)"),
+		    &selectedFilter, (m_useNativeDialogs ? QFileDialog::Options() : QFileDialog::DontUseNativeDialog));
 	} else {
 		fileName = calibrationFilePath;
 	}
@@ -559,13 +561,13 @@ void ManualCalibration::on_saveButton_clicked()
 	QFile file(fileName);
 	QString temp_ad9963, temp_fpga;
 	if (m_dmm_ad9963) {
-		temp_ad9963 = m_dmm_ad9963->readChannel("temp0").value;
+		temp_ad9963 = QString::number(m_dmm_ad9963->readChannel("temp0").value);
 	}
 	if (m_dmm_xadc) {
-		temp_fpga = m_dmm_xadc->readChannel("temp0").value;
+		temp_fpga = QString::number(m_dmm_xadc->readChannel("temp0").value);
 	}
 
-	if (file.open(QFile::WriteOnly | QFile::Truncate)) {
+	if (file.open(QIODevice::WriteOnly)) {
 		QTextStream stream(&file);
 
 		stream << "#Calibration time: " << QDate::currentDate().toString() << ", "

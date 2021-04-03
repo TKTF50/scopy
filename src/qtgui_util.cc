@@ -40,6 +40,9 @@
  */
 
 #include "utils.h"
+#include <sstream>
+#include <string>
+#include <algorithm>
 #include <QDebug>
 #include <QSizePolicy>
 
@@ -124,11 +127,46 @@ void Util::setWidgetNrOfChars(QWidget *w,
 	}
 }
 
-void Util::loadStylesheetFromFile(QString path, QWidget *widget)
+QString Util::loadStylesheetFromFile(const QString &path)
 {
 	QFile file(path);
 	file.open(QFile::ReadOnly);
 	QString stylesheet = QString::fromLatin1(file.readAll());
-	widget->setStyleSheet(stylesheet);
+	return stylesheet;
+}
+
+bool Util::compareNatural(const std::string& a, const std::string& b) {
+	if (a == b) {
+		return (a < b);
+	} else if (a.empty()) {
+		return true;
+	} else if (b.empty()) {
+		return false;
+	} else if (std::isdigit(a[0]) && !std::isdigit(b[0])) {
+		return true;
+	} else if (!std::isdigit(a[0]) && std::isdigit(b[0])) {
+		return false;
+	} else if (!std::isdigit(a[0]) && !std::isdigit(b[0])) {
+		if (a[0] == b[0]) {
+			return compareNatural(a.substr(1), b.substr(1));
+		}
+		return (a < b);
+	}
+
+	std::istringstream string_stream_a(a);
+	std::istringstream string_stream_b(b);
+
+	int int_a, int_b;
+	std::string a_new, b_new;
+
+	string_stream_a >> int_a;
+	string_stream_b >> int_b;
+	if (int_a != int_b) {
+		return (int_a < int_b);
+	}
+
+	std::getline(string_stream_a, a_new);
+	std::getline(string_stream_b, b_new);
+	return (compareNatural(a_new, b_new));
 }
 

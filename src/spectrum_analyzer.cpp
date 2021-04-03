@@ -206,8 +206,6 @@ SpectrumAnalyzer::SpectrumAnalyzer(struct iio_context *ctx, Filter *filt,
 	settings_group->setExclusive(true);
 
 	fft_plot = new FftDisplayPlot(m_adc_nb_channels, this);
-	fft_plot->canvas()->setStyleSheet(QString("QwtPlotCanvas { "
-	                                  "background-color: #141416; }"));
 	fft_plot->disableLegend();
 	// Disable mouse interactions with the axes until they are in a working state
 	fft_plot->setXaxisMouseGesturesEnabled(false);
@@ -605,6 +603,8 @@ SpectrumAnalyzer::SpectrumAnalyzer(struct iio_context *ctx, Filter *filt,
 	connect(ui->btnExport, &QPushButton::clicked,
 		this, &SpectrumAnalyzer::btnExportClicked);
 	readPreferences();
+
+	ui->btnHelp->setUrl("https://wiki.analog.com/university/tools/m2k/scopy/spectrumanalyzer");
 }
 
 SpectrumAnalyzer::~SpectrumAnalyzer()
@@ -2124,8 +2124,8 @@ void SpectrumAnalyzer::on_cmb_units_currentIndexChanged(const QString& unit)
 		switch (magType) {
 		case FftDisplayPlot::VPEAK:
 		case FftDisplayPlot::VRMS:
-			unit_per_div->setValue(1);
-			bottom->setValue(-100);
+			unit_per_div->setValue(2);
+			bottom->setValue(-10);
 			fft_plot->setAxisScale(QwtPlot::yLeft, bottom->value(), top->value());
 			break;
 		case FftDisplayPlot::VROOTHZ:
@@ -2134,7 +2134,7 @@ void SpectrumAnalyzer::on_cmb_units_currentIndexChanged(const QString& unit)
 			fft_plot->setAxisScale(QwtPlot::yLeft, bottom_scale->value(), top_scale->value());
 			break;
 		default:
-			unit_per_div->setValue(1);
+			unit_per_div->setValue(20);
 			bottom->setValue(-200);
 			fft_plot->setAxisScale(QwtPlot::yLeft, bottom->value(), top->value());
 			break;

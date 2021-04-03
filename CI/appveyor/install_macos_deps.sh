@@ -5,19 +5,20 @@ LIBAD9361_BRANCH=master
 LIBM2K_BRANCH=master
 GRIIO_BRANCH=upgrade-3.8
 GNURADIO_FORK=analogdevicesinc
-GNURADIO_BRANCH=ming-3.8-clean
+GNURADIO_BRANCH=scopy
 GRSCOPY_BRANCH=master
 GRM2K_BRANCH=master
 QWT_BRANCH=qwt-6.1-multiaxes
 QWTPOLAR_BRANCH=master # not used
 LIBSIGROK_BRANCH=master
 LIBSIGROKDECODE_BRANCH=master #not used
-BOOST_VERSION_FILE=1_65_1
-BOOST_VERSION=1.65.1
+BOOST_VERSION_FILE=1_73_0
+BOOST_VERSION=1.73.0
+LIBTINYIIOD_BRANCH=master
 
 PYTHON="python3"
-PACKAGES=" qt pkg-config cmake fftw bison gettext autoconf automake libtool libzip glib libusb $PYTHON"
-PACKAGES="$PACKAGES glibmm doxygen wget gnu-sed libmatio dylibbundler libxml2"
+PACKAGES=" ${QT_FORMULAE} pkg-config cmake fftw bison gettext autoconf automake libtool libzip glib libusb glog $PYTHON"
+PACKAGES="$PACKAGES doxygen wget gnu-sed libmatio dylibbundler libxml2"
 
 set -e
 cd ~
@@ -48,14 +49,15 @@ pip3 install mako six
 pwd
 source ./projects/scopy/CI/appveyor/before_install_lib.sh
 
-QT_PATH="$(brew --prefix qt)/bin"
+QT_PATH="$(brew --prefix ${QT_FORMULAE})/bin"
+
 export PATH="/usr/local/bin:$PATH"
 export PATH="/usr/local/opt/bison/bin:$PATH"
 export PATH="${QT_PATH}:$PATH"
 export PKG_CONFIG_PATH="$PKG_CONFIG_PATH:/usr/local/opt/libzip/lib/pkgconfig"
 export PKG_CONFIG_PATH="$PKG_CONFIG_PATH:/usr/local/opt/libffi/lib/pkgconfig"
-export PKG_CONFIG_PATH="$PKG_CONFIG_PATH:/usr/local/opt/glibmm/lib/pkgconfig"
 
+echo $PKG_CONFIG_PATH
 QMAKE="$(command -v qmake)"
 
 CMAKE_OPTS="-DCMAKE_PREFIX_PATH=$STAGINGDIR -DCMAKE_INSTALL_PREFIX=$STAGINGDIR"
@@ -98,6 +100,7 @@ build_libm2k() {
 		-DBUILD_EXAMPLES=OFF \
 		-DENABLE_TOOLS=OFF \
 		-DINSTALL_UDEV_RULES=OFF \
+		-DENABLE_LOG=ON\
 		${WORKDIR}/libm2k
 
 	make $JOBS
@@ -200,7 +203,6 @@ build_grm2k() {
 
 build_grscopy() {
 	echo "### Building gr-scopy - branch $GRSCOPY_BRANCH"
-
 	cd ~
 	git clone --depth 1 https://github.com/analogdevicesinc/gr-scopy.git -b $GRSCOPY_BRANCH ${WORKDIR}/gr-scopy
 	mkdir ${WORKDIR}/gr-scopy/build-${ARCH}
@@ -209,6 +211,27 @@ build_grscopy() {
 	cmake ${CMAKE_OPTS} \
 		${WORKDIR}/gr-scopy
 
+	make $JOBS
+	sudo make $JOBS install
+}
+build_glibmm() {
+	echo "### Building glibmm - 2.64.0"
+	cd ~
+	wget http://ftp.acc.umu.se/pub/gnome/sources/glibmm/2.64/glibmm-2.64.0.tar.xz
+	tar xzvf glibmm-2.64.0.tar.xz
+	cd glibmm-2.64.0
+	./configure
+	make $JOBS
+	sudo make $JOBS install
+}
+
+build_sigcpp() {
+	echo "### Building libsigc++ -2.10.0"
+	cd ~
+	wget http://ftp.acc.umu.se/pub/GNOME/sources/libsigc++/2.10/libsigc++-2.10.0.tar.xz
+	tar xvzf libsigc++-2.10.0.tar.xz
+	cd libsigc++-2.10.0
+	./configure
 	make $JOBS
 	sudo make $JOBS install
 }
@@ -256,6 +279,24 @@ build_qwtpolar() {
 	qmake_build_wget "qwtpolar-1.1.1" "https://downloads.sourceforge.net/project/qwtpolar/qwtpolar/1.1.1/qwtpolar-1.1.1.tar.bz2" "qwtpolar.pro" "patch_qwtpolar_mac"
 }
 
+build_libtinyiiod() {
+	echo "### Building libtinyiiod - branch $LIBTINYIIOD_BRANCH"
+
+	cd ~
+	git clone --depth 1 https://github.com/analogdevicesinc/libtinyiiod.git -b $LIBTINYIIOD_BRANCH ${WORKDIR}/libtinyiiod
+	mkdir ${WORKDIR}/libtinyiiod/build-${ARCH}
+	cd ${WORKDIR}/libtinyiiod/build-${ARCH}
+
+	cmake ${CMAKE_OPTS} \
+		-DBUILD_EXAMPLES=OFF \
+		${WORKDIR}/libtinyiiod
+
+	make $JOBS
+	sudo make $JOBS install
+}
+
+build_sigcpp
+build_glibmm
 build_libiio
 build_libad9361
 build_libm2k
@@ -268,8 +309,4 @@ build_grm2k
 build_qwt
 build_qwtpolar
 build_libsigrokdecode
-
-
-
-
-
+build_libtinyiiod

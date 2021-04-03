@@ -34,6 +34,7 @@
 #include "../pattern_generator.h"
 #include "../../logicanalyzer/annotationcurve.h"
 #include "../../logicanalyzer/annotationdecoder.h"
+#include "dynamicWidget.hpp"
 
 #include <math.h>
 
@@ -149,7 +150,7 @@ void Pattern::setNrOfChannels(int channels)
 
 uint32_t Pattern::get_min_sampling_freq()
 {
-	return 1; // minimum 1 hertz if not specified otherwise
+	return 1000; // minimum 1 kHz if not specified otherwise
 }
 
 uint32_t Pattern::get_required_nr_of_samples(uint32_t sample_rate,
@@ -778,9 +779,11 @@ void NumberPatternUI::parse_ui()
 
 	max = (1 << pattern->nrOfChannels()) - 1;
 	if (val <= max && ok) {
-		ui->numberLineEdit->setStyleSheet("color:white");
+		setDynamicProperty(ui->numberLineEdit, "valid", true);
+		setDynamicProperty(ui->numberLineEdit, "invalid", false);
 	} else {
-		ui->numberLineEdit->setStyleSheet("color:red");
+		setDynamicProperty(ui->numberLineEdit, "invalid", true);
+		setDynamicProperty(ui->numberLineEdit, "valid", false);
 	}
 
 	pattern->set_nr(val);
@@ -1443,12 +1446,12 @@ uint8_t UARTPattern::generate_pattern(uint32_t sample_rate,
 	memset(buffer, 0xff, (number_of_samples)*sizeof(short));
 
 	short *buf_ptr = buffer;
+	short *buf_ptr_end = buffer + number_of_samples;
 	const char *str_ptr = str.c_str();
 	int i;
 
-	for (i=0; i<samples_per_frame/2; i++) { // pad with half a frame
+	for (i=0; i<samples_per_frame/2 && buf_ptr < buf_ptr_end; i++, buf_ptr++) { // pad with half a frame
 		*buf_ptr = 1;
-		buf_ptr++;
 	}
 
 	for (i=0; i<str.length(); i++,str_ptr++) {
@@ -1466,18 +1469,17 @@ uint8_t UARTPattern::generate_pattern(uint32_t sample_rate,
 				frame_to_send = frame_to_send << 1;
 			}
 
-			for (auto k=0; k<samples_per_bit; k++,buf_ptr++) {
+			for (auto k=0; k<samples_per_bit && buf_ptr < buf_ptr_end; k++,buf_ptr++) {
 				*buf_ptr =  bit_to_send;// set bit here
 			}
 		}
 	}
 
-	for (i=0; i<samples_per_frame/2; i++) { // pad with half a frame
+	for (i=0; i<samples_per_frame/2 && buf_ptr < buf_ptr_end; i++, buf_ptr++) { // pad with half a frame
 		*buf_ptr = 1;
-		buf_ptr++;
 	}
 
-	for (; buf_ptr!=(short *)(buffer+number_of_samples); buf_ptr++) {
+	for (; buf_ptr!=(short *)(buffer+number_of_samples) && buf_ptr < buf_ptr_end; buf_ptr++) {
 		*buf_ptr = 1;
 	}
 
@@ -1728,19 +1730,19 @@ void I2CPattern::sample_bit(bool bit)
 {
 	// SDA Transitions must occur when SCL is LOW (unless starting or stopping)
 	// Set SDA whilst SCL is low from previous bit
-	for (auto i=0; i<samples_per_bit/4; i++,buf_ptr++) {
+	for (auto i=0; i<samples_per_bit/4 && buf_ptr < buf_ptr_end; i++,buf_ptr++) {
 		*buf_ptr = changeBit(*buf_ptr,SDA,bit);
 		*buf_ptr = changeBit(*buf_ptr,SCL,0);
 	}
 
 	// Sample SDA by clocking SCL
-	for (auto i=0; i<samples_per_bit/2; i++,buf_ptr++) {
+	for (auto i=0; i<samples_per_bit/2 && buf_ptr < buf_ptr_end; i++,buf_ptr++) {
 		*buf_ptr = changeBit(*buf_ptr,SDA,bit);
 		*buf_ptr = changeBit(*buf_ptr,SCL,1);
 	}
 
 	// Leave SCL low for next bit
-	for (auto i=0; i<samples_per_bit/4; i++,buf_ptr++) {
+	for (auto i=0; i<samples_per_bit/4 && buf_ptr < buf_ptr_end; i++,buf_ptr++) {
 		*buf_ptr = changeBit(*buf_ptr,SDA,bit);
 		*buf_ptr = changeBit(*buf_ptr,SCL,0);
 	}
@@ -1749,22 +1751,22 @@ void I2CPattern::sample_bit(bool bit)
 void I2CPattern::sample_start_bit()
 {
 	// Explicitly set start condition, consume 2 bits
-	for (auto i=0; i<samples_per_bit/2; i++,buf_ptr++) {
+	for (auto i=0; i<samples_per_bit/2 && buf_ptr < buf_ptr_end; i++,buf_ptr++) {
 		*buf_ptr = changeBit(*buf_ptr,SDA,1);
 		*buf_ptr = changeBit(*buf_ptr,SCL,1);
 	}
 
-	for (auto i=0; i<samples_per_bit/2; i++,buf_ptr++) {
+	for (auto i=0; i<samples_per_bit/2 && buf_ptr < buf_ptr_end; i++,buf_ptr++) {
 		*buf_ptr = changeBit(*buf_ptr,SDA,0);
 		*buf_ptr = changeBit(*buf_ptr,SCL,1);
 	}
 
-	for (auto i=0; i<samples_per_bit/2; i++,buf_ptr++) {
+	for (auto i=0; i<samples_per_bit/2 && buf_ptr < buf_ptr_end; i++,buf_ptr++) {
 		*buf_ptr = changeBit(*buf_ptr,SDA,0);
 		*buf_ptr = changeBit(*buf_ptr,SCL,0);
 	}
 
-	for (auto i=0; i<samples_per_bit/2; i++,buf_ptr++) {
+	for (auto i=0; i<samples_per_bit/2 && buf_ptr < buf_ptr_end; i++,buf_ptr++) {
 		*buf_ptr = changeBit(*buf_ptr,SDA,0);
 		*buf_ptr = changeBit(*buf_ptr,SCL,0);
 	}
@@ -1835,22 +1837,22 @@ void I2CPattern::sample_payload()
 void I2CPattern::sample_stop()
 {
 	// Explicitly set stop condition, consume 2 bits
-	for (auto i=0; i<samples_per_bit/2; i++,buf_ptr++) {
+	for (auto i=0; i<samples_per_bit/2 && buf_ptr < buf_ptr_end; i++,buf_ptr++) {
 		*buf_ptr = changeBit(*buf_ptr,SDA,0);
 		*buf_ptr = changeBit(*buf_ptr,SCL,0);
 	}
 
-	for (auto i=0; i<samples_per_bit/2; i++,buf_ptr++) {
+	for (auto i=0; i<samples_per_bit/2 && buf_ptr < buf_ptr_end; i++,buf_ptr++) {
 		*buf_ptr = changeBit(*buf_ptr,SDA,0);
 		*buf_ptr = changeBit(*buf_ptr,SCL,1);
 	}
 
-	for (auto i=0; i<samples_per_bit/2; i++,buf_ptr++) {
+	for (auto i=0; i<samples_per_bit/2 && buf_ptr < buf_ptr_end; i++,buf_ptr++) {
 		*buf_ptr = changeBit(*buf_ptr,SDA,1);
 		*buf_ptr = changeBit(*buf_ptr,SCL,1);
 	}
 
-	for (auto i=0; i<samples_per_bit/2; i++,buf_ptr++) {
+	for (auto i=0; i<samples_per_bit/2 && buf_ptr < buf_ptr_end; i++,buf_ptr++) {
 		*buf_ptr = changeBit(*buf_ptr,SDA,1);
 		*buf_ptr = changeBit(*buf_ptr,SCL,1);
 	}
@@ -1863,6 +1865,7 @@ uint8_t I2CPattern::generate_pattern(uint32_t sample_rate,
 
 	buffer = new short[number_of_samples]; // no need to recreate buffer
 	buf_ptr = buffer;
+	buf_ptr_end = buffer + number_of_samples;
 	memset(buffer, (0xff), (number_of_samples)*sizeof(short));
 
 	samples_per_bit = 1*(sample_rate/clkFrequency);
@@ -2031,9 +2034,11 @@ void I2CPatternUI::parse_ui()
 	}
 
 	if (fail) {
-		ui->LE_toSend->setStyleSheet("color:red");
+		setDynamicProperty(ui->LE_toSend, "invalid", true);
+		setDynamicProperty(ui->LE_toSend, "valid", false);
 	} else {
-		ui->LE_toSend->setStyleSheet("color:white");
+		setDynamicProperty(ui->LE_toSend, "valid", true);
+		setDynamicProperty(ui->LE_toSend, "invalid", false);
 	}
 
 
@@ -2125,6 +2130,7 @@ uint8_t SPIPattern::generate_pattern(uint32_t sample_rate,
 	}
 
 	short *buf_ptr = buffer;
+	short *buf_ptr_end = buffer + number_of_samples;
 
 	auto samples_per_bit = 2 * (sample_rate/clkFrequency);
 	buf_ptr += waitClocks * samples_per_bit;
@@ -2139,7 +2145,7 @@ uint8_t SPIPattern::generate_pattern(uint32_t sample_rate,
 
 		if(CPHA && start_new_frame)
 		{
-			for (auto i=samples_per_bit/2; i<samples_per_bit; i++,buf_ptr++) {
+			for (auto i=samples_per_bit/2; i<samples_per_bit && buf_ptr < buf_ptr_end; i++,buf_ptr++) {
 				*buf_ptr = changeBit(*buf_ptr,csBit,CSPOL);
 				*buf_ptr = changeBit(*buf_ptr,clkActiveBit,!CPOL);
 				*buf_ptr = changeBit(*buf_ptr,outputBit,oldbit);
@@ -2156,7 +2162,7 @@ uint8_t SPIPattern::generate_pattern(uint32_t sample_rate,
 				val = val >> 1;
 			}
 
-			for (auto i=0; i<samples_per_bit/2; i++,buf_ptr++) {
+			for (auto i=0; i<samples_per_bit/2 && buf_ptr < buf_ptr_end; i++,buf_ptr++) {
 				*buf_ptr = changeBit(*buf_ptr,csBit,CSPOL);
 				*buf_ptr = changeBit(*buf_ptr,clkActiveBit,CPOL);
 
@@ -2167,7 +2173,7 @@ uint8_t SPIPattern::generate_pattern(uint32_t sample_rate,
 				}
 			}
 
-			for (auto i=samples_per_bit/2; i<samples_per_bit; i++,buf_ptr++) {
+			for (auto i=samples_per_bit/2; i<samples_per_bit && buf_ptr < buf_ptr_end; i++,buf_ptr++) {
 				*buf_ptr = changeBit(*buf_ptr,csBit,CSPOL);
 				*buf_ptr = changeBit(*buf_ptr,clkActiveBit,!CPOL);
 				*buf_ptr = changeBit(*buf_ptr,outputBit,bit);
@@ -2181,7 +2187,7 @@ uint8_t SPIPattern::generate_pattern(uint32_t sample_rate,
 		if (frameBytesLeft == 0) {
 			if(!CPHA)
 			{
-				for (auto i=samples_per_bit/2; i<samples_per_bit; i++,buf_ptr++) {
+				for (auto i=samples_per_bit/2; i<samples_per_bit && buf_ptr < buf_ptr_end; i++,buf_ptr++) {
 					*buf_ptr = changeBit(*buf_ptr,csBit,CSPOL);
 					*buf_ptr = changeBit(*buf_ptr,clkActiveBit,!CPOL);
 					*buf_ptr = changeBit(*buf_ptr,outputBit,bit);
@@ -2430,9 +2436,11 @@ void SPIPatternUI::parse_ui()
 	}
 
 	if (fail) {
-		ui->LE_toSend->setStyleSheet("color:red");
+		setDynamicProperty(ui->LE_toSend, "invalid", true);
+		setDynamicProperty(ui->LE_toSend, "valid", false);
 	} else {
-		ui->LE_toSend->setStyleSheet("color:white");
+		setDynamicProperty(ui->LE_toSend, "valid", true);
+		setDynamicProperty(ui->LE_toSend, "invalid", false);
 	}
 
 

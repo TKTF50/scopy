@@ -84,6 +84,7 @@ namespace adiscope {
 		void levelChanged(double);
 		void analogTriggerEnabled(bool);
 		void triggerModeChanged(int);
+		void showLogicAnalyzerTriggerSettings();
 
 	public Q_SLOTS:
 		void setTriggerDelay(long long);
@@ -144,6 +145,8 @@ namespace adiscope {
 		libm2k::analog::M2kAnalogIn* m_m2k_adc;
 		libm2k::M2kHardwareTrigger* m_trigger;
 		bool m_trigger_in;
+
+		bool digital_trigger_was_on;
 
 		std::vector<std::pair<QString, libm2k::M2K_TRIGGER_OUT_SELECT>> externalTriggerOutMapping;
 
